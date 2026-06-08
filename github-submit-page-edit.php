@@ -119,9 +119,17 @@ try {
         'published_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {
+    $message = $error->getMessage();
+    $status = 502;
+    if (str_contains($message, 'GITHUB_API_TOKEN cannot publish')
+        || str_contains($message, 'missing repository write permissions')
+        || str_contains($message, 'needs write access')) {
+        $status = 503;
+    }
+
     github_json([
         'ok' => false,
         'error' => 'github_publish_failed',
-        'message' => $error->getMessage(),
-    ], 502);
+        'message' => $message,
+    ], $status);
 }

@@ -1233,6 +1233,88 @@ function github_require_authenticated_editor(): array
     ];
 }
 
+function github_editor_commit_identity(array $user): array
+{
+    $name = trim((string) ($user['displayName'] ?? $user['login'] ?? 'Genepedia Editor'));
+    $email = trim((string) ($user['email'] ?? ''));
+    if ($email === '') {
+        $login = trim((string) ($user['login'] ?? 'user'));
+        $id = trim((string) ($user['id'] ?? ''));
+        $email = $id !== ''
+            ? $id . '+' . $login . '@users.noreply.github.com'
+            : $login . '@users.noreply.github.com';
+    }
+
+    return [
+        'name' => $name !== '' ? $name : 'Genepedia Editor',
+        'email' => $email,
+    ];
+}
+
+function github_resolve_page_edit_api_token(array $editor): string
+{
+    $serverToken = github_api_token();
+    if ($serverToken !== '') {
+        return $serverToken;
+    }
+
+    $userToken = trim((string) ($editor['token'] ?? ''));
+    if ($userToken !== '') {
+        return $userToken;
+    }
+
+    throw new RuntimeException(
+        'Page publishing is not configured. Set GITHUB_API_TOKEN with repository write access on the API server.'
+    );
+}
+
+function github_token_repo_permissions(string $owner, string $repo, string $token): array
+{
+    $repository = github_rest_request_json(
+        'GET',
+        sprintf('https://api.github.com/repos/%s/%s', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        null,
+        'Repository lookup',
+    );
+
+    return is_array($repository['permissions'] ?? null) ? $repository['permissions'] : [];
+}
+
+function github_publish_auth_status(): array
+{
+    $token = github_api_token();
+    if ($token === '') {
+        return [
+            'configured' => false,
+            'can_publish' => false,
+            'message' => 'Set GITHUB_API_TOKEN with Contents and Pull requests write access.',
+        ];
+    }
+
+    $repoConfig = github_repo_config();
+    try {
+        $permissions = github_token_repo_permissions($repoConfig['owner'], $repoConfig['repo'], $token);
+    } catch (Throwable $error) {
+        return [
+            'configured' => true,
+            'can_publish' => false,
+            'message' => $error->getMessage(),
+        ];
+    }
+
+    $canPublish = !empty($permissions['push']) || !empty($permissions['admin']) || !empty($permissions['maintain']);
+
+    return [
+        'configured' => true,
+        'can_publish' => $canPublish,
+        'permissions' => $permissions,
+        'message' => $canPublish
+            ? 'Server API token can create branches, commits, and pull requests.'
+            : 'GITHUB_API_TOKEN can read the repository but needs write access to publish page edits.',
+    ];
+}
+
 function github_encode_repo_path(string $path): string
 {
     $parts = array_values(array_filter(
@@ -1251,17 +1333,37 @@ function github_sanitize_branch_segment(string $value): string
     return $normalized !== '' ? $normalized : 'editor';
 }
 
-function github_rest_request_json(string $method, string $url, ?string $token, ?array $body = null): array
+function github_format_rest_error(array $response, string $operation = 'GitHub API request'): string
+{
+    $status = (int) ($response['status'] ?? 0);
+    $data = $response['data'];
+    $message = is_array($data)
+        ? (string) ($data['message'] ?? 'GitHub API request failed.')
+        : 'GitHub API request failed.';
+
+    $detail = $operation . ' failed: ' . $message;
+
+    if ($status === 404) {
+        $detail .= ' Check GITHUB_REPO and that the API token can access the repository.';
+    } elseif ($status === 403) {
+        $detail .= ' The API token may be missing repository write permissions.';
+    }
+
+    if ($status > 0) {
+        $detail .= ' (HTTP ' . $status . ')';
+    }
+
+    return $detail;
+}
+
+function github_rest_request_json(string $method, string $url, ?string $token, ?array $body = null, string $operation = 'GitHub API request'): array
 {
     $response = github_rest_request($method, $url, $token, $body);
     $status = $response['status'];
     $data = $response['data'];
 
     if ($status >= 400) {
-        $message = is_array($data)
-            ? (string) ($data['message'] ?? 'GitHub API request failed.')
-            : 'GitHub API request failed.';
-        throw new RuntimeException($message);
+        throw new RuntimeException(github_format_rest_error($response, $operation));
     }
 
     if (!is_array($data)) {
@@ -1277,6 +1379,8 @@ function github_get_repository_default_branch(string $owner, string $repo, strin
         'GET',
         sprintf('https://api.github.com/repos/%s/%s', rawurlencode($owner), rawurlencode($repo)),
         $token,
+        null,
+        'Repository lookup',
     );
 
     $defaultBranch = trim((string) ($repository['default_branch'] ?? 'main'));
@@ -1293,6 +1397,8 @@ function github_get_repository_default_branch(string $owner, string $repo, strin
             rawurlencode($defaultBranch),
         ),
         $token,
+        null,
+        'Default branch lookup',
     );
 
     $sha = trim((string) ($reference['object']['sha'] ?? ''));
@@ -1352,6 +1458,7 @@ function github_create_branch_from_sha(
             'ref' => 'refs/heads/' . $branchName,
             'sha' => $sha,
         ],
+        'Create branch',
     );
 }
 
@@ -1364,6 +1471,7 @@ function github_upsert_file_on_branch(
     string $commitMessage,
     ?string $existingSha,
     string $token,
+    ?array $commitIdentity = null,
 ): array {
     $payload = [
         'message' => $commitMessage,
@@ -1373,6 +1481,11 @@ function github_upsert_file_on_branch(
 
     if ($existingSha !== null && $existingSha !== '') {
         $payload['sha'] = $existingSha;
+    }
+
+    if (is_array($commitIdentity)) {
+        $payload['author'] = $commitIdentity;
+        $payload['committer'] = $commitIdentity;
     }
 
     return github_rest_request_json(
@@ -1385,6 +1498,7 @@ function github_upsert_file_on_branch(
         ),
         $token,
         $payload,
+        'Update file',
     );
 }
 
@@ -1408,6 +1522,7 @@ function github_create_pull_request(
             'body' => $body,
             'maintainer_can_modify' => true,
         ],
+        'Create pull request',
     );
 }
 
@@ -1421,16 +1536,18 @@ function github_create_page_edit_pull_request(
     string $prTitle,
     string $prBody,
 ): array {
-    $token = trim((string) ($editor['token'] ?? ''));
+    $token = github_resolve_page_edit_api_token($editor);
     $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
     $login = github_sanitize_branch_segment((string) ($user['login'] ?? 'editor'));
-
-    if ($token === '') {
-        throw new RuntimeException('GitHub login is required to publish page edits.');
-    }
+    $commitIdentity = github_editor_commit_identity($user);
 
     if (strlen($content) > 2_000_000) {
         throw new RuntimeException('The edited page is too large to publish.');
+    }
+
+    $publishStatus = github_publish_auth_status();
+    if (($publishStatus['configured'] ?? false) && !($publishStatus['can_publish'] ?? false)) {
+        throw new RuntimeException((string) ($publishStatus['message'] ?? 'GITHUB_API_TOKEN cannot publish page edits.'));
     }
 
     $base = github_get_repository_default_branch($owner, $repo, $token);
@@ -1442,8 +1559,14 @@ function github_create_page_edit_pull_request(
 
     github_create_branch_from_sha($owner, $repo, $branchName, $baseSha, $token);
 
-    $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $baseBranch, $token);
+    $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $branchName, $token);
+    if ($existingFile === null) {
+        $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $baseBranch, $token);
+    }
     $existingSha = is_array($existingFile) ? (string) ($existingFile['sha'] ?? '') : null;
+    if ($existingSha === '') {
+        $existingSha = null;
+    }
 
     $commit = github_upsert_file_on_branch(
         $owner,
@@ -1454,6 +1577,7 @@ function github_create_page_edit_pull_request(
         $commitMessage,
         $existingSha,
         $token,
+        $commitIdentity,
     );
 
     $pullRequest = github_create_pull_request(

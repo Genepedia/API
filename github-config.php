@@ -16,14 +16,16 @@ if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
 
 $repoConfig = github_repo_config();
 $apiAuth = github_api_auth_status();
+$publishAuth = github_publish_auth_status();
 
 github_json([
     'ok' => true,
     'oauth_configured' => github_config()['client_id'] !== '' && github_config()['client_secret'] !== '',
     'api_auth' => $apiAuth,
+    'publish_auth' => $publishAuth,
     'repo' => $repoConfig['owner'] . '/' . $repoConfig['repo'],
     'setup' => [
-        'recommended' => 'Add GITHUB_API_TOKEN to the API server .env file.',
+        'recommended' => 'Add GITHUB_API_TOKEN to the API server .env file with repository write access for page publishing.',
         'token_url' => 'https://github.com/settings/tokens',
         'alternative' => 'Or configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY for GitHub App authentication.',
     ],

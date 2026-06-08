@@ -10,10 +10,10 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 if [[ "${1:-}" == "" ]]; then
-  echo "Paste a GitHub personal access token with read access to the Genepedia repository."
+  echo "Paste a GitHub personal access token with read and write access to the Genepedia repository."
   echo "Create one at: https://github.com/settings/tokens"
   echo "Classic PAT scope: public_repo"
-  echo "Fine-grained PAT: Contents (Read) + Metadata (Read) on Genepedia/Genepedia"
+  echo "Fine-grained PAT: Contents (Read and write) + Pull requests (Read and write) + Metadata (Read) on Genepedia/Genepedia"
   echo
   read -r -s -p "GITHUB_API_TOKEN: " TOKEN
   echo
@@ -50,7 +50,7 @@ for line in lines:
 if not found:
     if output and output[-1].strip() != "":
         output.append("")
-    output.append("# Server token for commit history (5,000 GitHub API requests/hour)")
+    output.append("# Server token for commit history and page publishing (5,000 GitHub API requests/hour)")
     output.append(f"GITHUB_API_TOKEN={token}")
     updated = True
 

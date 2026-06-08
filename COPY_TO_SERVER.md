@@ -31,8 +31,10 @@
    ./scripts/configure-github-api-token.sh
 
    Or add `GITHUB_API_TOKEN` manually to `.env` on the server. Use a classic PAT
-   with `public_repo` scope, or a fine-grained PAT with Contents (Read) and
-   Metadata (Read) on `Genepedia/Genepedia`.
+   with `public_repo` scope, or a fine-grained PAT with Contents (Read and write),
+   Pull requests (Read and write), and Metadata (Read) on `Genepedia/Genepedia`.
+   Page publishing uses this server token; GitHub login is still required to
+   identify who submitted the edit.
 
 5. Test configuration:
 
