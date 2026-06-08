@@ -1956,3 +1956,360 @@ function github_create_page_edit_pull_request(
     throw new RuntimeException(github_build_publish_token_help_message($failures));
 }
 
+function github_review_login(): string
+{
+    $configured = github_env_value('GITHUB_REVIEW_LOGIN');
+
+    return $configured !== '' ? $configured : 'ShaunRoselt';
+}
+
+function github_user_can_review_pull_requests(?array $user): bool
+{
+    if (!is_array($user)) {
+        return false;
+    }
+
+    return strcasecmp(trim((string) ($user['login'] ?? '')), github_review_login()) === 0;
+}
+
+function github_require_pull_request_reviewer(): array
+{
+    $editor = github_require_authenticated_editor();
+    if (!github_user_can_review_pull_requests($editor['user'])) {
+        throw new RuntimeException(
+            'Only ' . github_review_login() . ' can approve or decline pending changes.'
+        );
+    }
+
+    return $editor;
+}
+
+function github_normalize_pull_request_user(?array $user): array
+{
+    if (!is_array($user)) {
+        return [
+            'login' => '',
+            'displayName' => '',
+            'photoUrl' => '',
+            'profileUrl' => '',
+        ];
+    }
+
+    $login = trim((string) ($user['login'] ?? ''));
+
+    return [
+        'login' => $login,
+        'displayName' => trim((string) ($user['name'] ?? '')) ?: $login,
+        'photoUrl' => trim((string) ($user['avatar_url'] ?? '')),
+        'profileUrl' => trim((string) ($user['html_url'] ?? '')),
+    ];
+}
+
+function github_extract_page_path_from_pull_request_body(array $pullRequest): string
+{
+    if (preg_match('/`((?:pages|people)\/[^`]+)`/', (string) ($pullRequest['body'] ?? ''), $matches) === 1) {
+        return $matches[1];
+    }
+
+    return '';
+}
+
+function github_pull_request_summary_matches_paths(array $summary, array $paths): bool
+{
+    if ($paths === []) {
+        return true;
+    }
+
+    foreach ($paths as $path) {
+        $path = trim((string) $path);
+        if ($path === '') {
+            continue;
+        }
+
+        $pagePath = trim((string) ($summary['page_path'] ?? ''));
+        if ($pagePath !== '' && $pagePath === $path) {
+            return true;
+        }
+
+        $fileSlug = github_sanitize_branch_segment((string) pathinfo($path, PATHINFO_FILENAME));
+        $ref = strtolower(trim((string) ($summary['head']['ref'] ?? '')));
+        if ($fileSlug !== '' && str_starts_with($ref, 'edit/' . $fileSlug . '-')) {
+            return true;
+        }
+
+        if (str_contains((string) ($summary['body'] ?? ''), '`' . $path . '`')) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function github_normalize_pull_request_summary(array $pullRequest): array
+{
+    $user = $pullRequest['user'] ?? null;
+    $head = is_array($pullRequest['head'] ?? null) ? $pullRequest['head'] : [];
+    $base = is_array($pullRequest['base'] ?? null) ? $pullRequest['base'] : [];
+
+    return [
+        'number' => (int) ($pullRequest['number'] ?? 0),
+        'title' => trim((string) ($pullRequest['title'] ?? '')),
+        'body' => trim((string) ($pullRequest['body'] ?? '')),
+        'page_path' => github_extract_page_path_from_pull_request_body($pullRequest),
+        'state' => trim((string) ($pullRequest['state'] ?? '')),
+        'url' => trim((string) ($pullRequest['html_url'] ?? '')),
+        'created_at' => trim((string) ($pullRequest['created_at'] ?? '')),
+        'updated_at' => trim((string) ($pullRequest['updated_at'] ?? '')),
+        'merged' => !empty($pullRequest['merged_at']),
+        'draft' => !empty($pullRequest['draft']),
+        'user' => github_normalize_pull_request_user(is_array($user) ? $user : null),
+        'head' => [
+            'ref' => trim((string) ($head['ref'] ?? '')),
+            'sha' => trim((string) ($head['sha'] ?? '')),
+        ],
+        'base' => [
+            'ref' => trim((string) ($base['ref'] ?? '')),
+            'sha' => trim((string) ($base['sha'] ?? '')),
+        ],
+        'additions' => (int) ($pullRequest['additions'] ?? 0),
+        'deletions' => (int) ($pullRequest['deletions'] ?? 0),
+        'changed_files' => (int) ($pullRequest['changed_files'] ?? 0),
+    ];
+}
+
+function github_is_page_editor_pull_request(array $pullRequest): bool
+{
+    $head = is_array($pullRequest['head'] ?? null) ? $pullRequest['head'] : [];
+    $ref = trim((string) ($head['ref'] ?? ''));
+
+    return str_starts_with($ref, 'edit/');
+}
+
+function github_fetch_open_pull_requests(
+    string $owner,
+    string $repo,
+    bool $pageEditorOnly = true,
+    array $paths = [],
+): array {
+    github_require_api_token();
+
+    $url = sprintf(
+        'https://api.github.com/repos/%s/%s/pulls?state=open&sort=updated&direction=desc&per_page=100',
+        rawurlencode($owner),
+        rawurlencode($repo),
+    );
+    $response = github_rest_get($url);
+    if ($response['status'] >= 400) {
+        throw new RuntimeException(github_format_rest_error($response, 'Open pull request lookup'));
+    }
+
+    $items = is_array($response['data']) ? $response['data'] : [];
+    $pullRequests = [];
+
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+
+        if ($pageEditorOnly && !github_is_page_editor_pull_request($item)) {
+            continue;
+        }
+
+        $summary = github_normalize_pull_request_summary($item);
+        if ($paths !== [] && !github_pull_request_summary_matches_paths($summary, $paths)) {
+            continue;
+        }
+
+        $pullRequests[] = $summary;
+    }
+
+    return $pullRequests;
+}
+
+function github_fetch_pull_request(string $owner, string $repo, int $number): array
+{
+    github_require_api_token();
+
+    $response = github_rest_get(sprintf(
+        'https://api.github.com/repos/%s/%s/pulls/%d',
+        rawurlencode($owner),
+        rawurlencode($repo),
+        $number,
+    ));
+    if ($response['status'] === 404) {
+        throw new RuntimeException('Pull request not found.');
+    }
+    if ($response['status'] >= 400) {
+        throw new RuntimeException(github_format_rest_error($response, 'Pull request lookup'));
+    }
+
+    if (!is_array($response['data'])) {
+        throw new RuntimeException('GitHub returned an invalid pull request response.');
+    }
+
+    return $response['data'];
+}
+
+function github_fetch_pull_request_files(string $owner, string $repo, int $number): array
+{
+    github_require_api_token();
+
+    $response = github_rest_get(sprintf(
+        'https://api.github.com/repos/%s/%s/pulls/%d/files?per_page=100',
+        rawurlencode($owner),
+        rawurlencode($repo),
+        $number,
+    ));
+    if ($response['status'] >= 400) {
+        throw new RuntimeException(github_format_rest_error($response, 'Pull request file lookup'));
+    }
+
+    return is_array($response['data']) ? $response['data'] : [];
+}
+
+function github_build_file_diff_from_pr_file(
+    array $file,
+    string $owner,
+    string $repo,
+    string $baseSha,
+    string $headSha,
+): array {
+    $statusLabel = (string) ($file['status'] ?? 'modified');
+    $afterPath = (string) ($file['filename'] ?? '');
+    $beforePath = (string) ($file['previous_filename'] ?? $afterPath);
+    $before = null;
+    $after = null;
+
+    if ($statusLabel !== 'added' && $baseSha !== '') {
+        $before = github_fetch_file_contents_at_ref($owner, $repo, $beforePath, $baseSha);
+    }
+
+    if ($statusLabel !== 'removed' && $headSha !== '') {
+        $after = github_fetch_file_contents_at_ref($owner, $repo, $afterPath, $headSha);
+    }
+
+    return [
+        'path' => $afterPath !== '' ? $afterPath : $beforePath,
+        'status' => $statusLabel,
+        'before_path' => $beforePath,
+        'after_path' => $afterPath,
+        'additions' => (int) ($file['additions'] ?? 0),
+        'deletions' => (int) ($file['deletions'] ?? 0),
+        'patch' => isset($file['patch']) ? (string) $file['patch'] : null,
+        'before' => $before,
+        'after' => $after,
+    ];
+}
+
+function github_fetch_pull_request_detail(string $owner, string $repo, int $number): array
+{
+    $pullRequest = github_fetch_pull_request($owner, $repo, $number);
+    $summary = github_normalize_pull_request_summary($pullRequest);
+    $baseSha = $summary['base']['sha'];
+    $headSha = $summary['head']['sha'];
+    $files = github_fetch_pull_request_files($owner, $repo, $number);
+    $diffs = [];
+
+    foreach ($files as $file) {
+        if (!is_array($file)) {
+            continue;
+        }
+
+        $diffs[] = github_build_file_diff_from_pr_file($file, $owner, $repo, $baseSha, $headSha);
+    }
+
+    return [
+        'pull_request' => $summary,
+        'diffs' => $diffs,
+    ];
+}
+
+function github_merge_pull_request(string $owner, string $repo, int $number, string $token): array
+{
+    return github_rest_request_json(
+        'PUT',
+        sprintf(
+            'https://api.github.com/repos/%s/%s/pulls/%d/merge',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            $number,
+        ),
+        $token,
+        [
+            'merge_method' => 'squash',
+        ],
+        'Merge pull request',
+    );
+}
+
+function github_close_pull_request(string $owner, string $repo, int $number, string $token): array
+{
+    return github_rest_request_json(
+        'PATCH',
+        sprintf(
+            'https://api.github.com/repos/%s/%s/pulls/%d',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            $number,
+        ),
+        $token,
+        [
+            'state' => 'closed',
+        ],
+        'Close pull request',
+    );
+}
+
+function github_review_pull_request(string $owner, string $repo, int $number, string $action, array $reviewer): array
+{
+    $normalizedAction = strtolower(trim($action));
+    if ($normalizedAction !== 'merge' && $normalizedAction !== 'decline') {
+        throw new RuntimeException('Review action must be merge or decline.');
+    }
+
+    $pullRequest = github_fetch_pull_request($owner, $repo, $number);
+    if (strtolower((string) ($pullRequest['state'] ?? '')) !== 'open') {
+        throw new RuntimeException('This pull request is no longer open.');
+    }
+
+    $failures = [];
+    foreach (github_publish_token_candidates($reviewer) as $candidate) {
+        if (!github_token_can_publish($owner, $repo, $candidate['token'])) {
+            $failures[] = $candidate['source'] . ' lacks write access';
+            continue;
+        }
+
+        try {
+            if ($normalizedAction === 'merge') {
+                $result = github_merge_pull_request($owner, $repo, $number, $candidate['token']);
+                if (empty($result['merged'])) {
+                    throw new RuntimeException((string) ($result['message'] ?? 'GitHub could not merge this pull request.'));
+                }
+
+                return [
+                    'action' => 'merge',
+                    'merged' => true,
+                    'sha' => (string) ($result['sha'] ?? ''),
+                    'pull_request' => github_normalize_pull_request_summary(github_fetch_pull_request($owner, $repo, $number)),
+                ];
+            }
+
+            $closed = github_close_pull_request($owner, $repo, $number, $candidate['token']);
+
+            return [
+                'action' => 'decline',
+                'merged' => false,
+                'pull_request' => github_normalize_pull_request_summary($closed),
+            ];
+        } catch (RuntimeException $error) {
+            if (!github_is_publish_auth_failure($error)) {
+                throw $error;
+            }
+
+            $failures[] = $candidate['source'] . ': ' . $error->getMessage();
+        }
+    }
+
+    throw new RuntimeException(github_build_publish_token_help_message($failures));
+}
+
