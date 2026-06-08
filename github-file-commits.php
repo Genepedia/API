@@ -14,12 +14,12 @@ if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
     ], 405);
 }
 
-$path = github_validate_repo_file_path((string) ($_GET['path'] ?? ''));
-if ($path === null) {
+$paths = github_parse_repo_file_paths_request();
+if ($paths === null) {
     github_json([
         'ok' => false,
         'error' => 'invalid_path',
-        'message' => 'A valid repository file path is required.',
+        'message' => 'A valid repository file path or comma-separated paths query is required.',
     ], 400);
 }
 
@@ -36,11 +36,12 @@ if (isset($_GET['limit'])) {
 }
 
 try {
-    $commits = github_fetch_all_file_commits($owner, $repo, $path, $limit);
+    $commits = github_fetch_merged_file_commits($owner, $repo, $paths, $limit);
 
     github_json([
         'ok' => true,
-        'path' => $path,
+        'path' => $paths[0],
+        'paths' => $paths,
         'repo' => $repoSlug,
         'commits' => $commits,
         'count' => count($commits),

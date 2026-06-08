@@ -14,14 +14,14 @@ if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
     ], 405);
 }
 
-$path = github_validate_repo_file_path((string) ($_GET['path'] ?? ''));
+$paths = github_parse_repo_file_paths_request();
 $hash = github_validate_commit_hash((string) ($_GET['hash'] ?? ''));
 
-if ($path === null || $hash === null) {
+if ($paths === null || $hash === null) {
     github_json([
         'ok' => false,
         'error' => 'invalid_request',
-        'message' => 'A valid repository file path and commit hash are required.',
+        'message' => 'A valid repository file path (or paths) and commit hash are required.',
     ], 400);
 }
 
@@ -33,12 +33,26 @@ $repo = $repoConfig['repo'];
 $repoSlug = $owner . '/' . $repo;
 
 try {
-    $diff = github_fetch_file_commit_diff($owner, $repo, $path, $hash);
+    if (count($paths) === 1) {
+        $diff = github_fetch_file_commit_diff($owner, $repo, $paths[0], $hash);
+
+        github_json([
+            'ok' => true,
+            'repo' => $repoSlug,
+            'path' => $paths[0],
+            'paths' => $paths,
+            'diff' => $diff,
+            'fetched_at' => gmdate('c'),
+        ]);
+    }
+
+    $diffs = github_fetch_file_commit_diffs($owner, $repo, $paths, $hash);
 
     github_json([
         'ok' => true,
         'repo' => $repoSlug,
-        'diff' => $diff,
+        'paths' => $paths,
+        'diffs' => $diffs,
         'fetched_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {

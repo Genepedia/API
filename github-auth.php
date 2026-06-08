@@ -44,7 +44,7 @@ if (file_exists($envFile) && is_readable($envFile)) {
     }
 }
 
-const GITHUB_OAUTH_SCOPE = 'read:user user:email';
+const GITHUB_OAUTH_SCOPE = 'read:user user:email public_repo';
 const GITHUB_SESSION_USER_KEY = 'github_user';
 const GITHUB_SESSION_TOKEN_KEY = 'github_access_token';
 const GITHUB_SESSION_STATE_KEY = 'github_oauth_state';
@@ -693,6 +693,113 @@ function github_validate_repo_file_path(string $path): ?string
     return $normalized;
 }
 
+function github_parse_repo_file_paths_request(): ?array
+{
+    if (isset($_GET['paths'])) {
+        $raw = trim((string) $_GET['paths']);
+        if ($raw === '') {
+            return null;
+        }
+
+        $paths = [];
+        foreach (preg_split('/\s*,\s*/', $raw) ?: [] as $part) {
+            $validated = github_validate_repo_file_path((string) $part);
+            if ($validated === null) {
+                return null;
+            }
+
+            $paths[] = $validated;
+        }
+
+        return $paths !== [] ? array_values(array_unique($paths)) : null;
+    }
+
+    if (!isset($_GET['path'])) {
+        return null;
+    }
+
+    $validated = github_validate_repo_file_path((string) $_GET['path']);
+    return $validated !== null ? [$validated] : null;
+}
+
+function github_merge_commit_histories(array $listsByPath): array
+{
+    $merged = [];
+
+    foreach ($listsByPath as $path => $commits) {
+        if (!is_array($commits)) {
+            continue;
+        }
+
+        foreach ($commits as $commit) {
+            if (!is_array($commit)) {
+                continue;
+            }
+
+            $hash = (string) ($commit['hash'] ?? '');
+            if ($hash === '') {
+                continue;
+            }
+
+            if (!isset($merged[$hash])) {
+                $merged[$hash] = $commit;
+                $merged[$hash]['paths'] = [$path];
+                continue;
+            }
+
+            if (!in_array($path, $merged[$hash]['paths'], true)) {
+                $merged[$hash]['paths'][] = $path;
+            }
+        }
+    }
+
+    $commits = array_values($merged);
+    usort($commits, static function (array $a, array $b): int {
+        return strcmp((string) ($b['date'] ?? ''), (string) ($a['date'] ?? ''));
+    });
+
+    foreach ($commits as &$commit) {
+        $paths = is_array($commit['paths'] ?? null) ? $commit['paths'] : [];
+        sort($paths);
+        $commit['paths'] = array_values(array_unique($paths));
+    }
+    unset($commit);
+
+    return $commits;
+}
+
+function github_fetch_merged_file_commits(string $owner, string $repo, array $paths, ?int $maxCommits = null): array
+{
+    github_require_api_token();
+
+    $paths = array_values(array_unique($paths));
+    if ($paths === []) {
+        return [];
+    }
+
+    if (count($paths) === 1) {
+        $commits = github_fetch_all_file_commits($owner, $repo, $paths[0], $maxCommits);
+        foreach ($commits as &$commit) {
+            $commit['paths'] = [$paths[0]];
+        }
+        unset($commit);
+
+        return $commits;
+    }
+
+    $listsByPath = [];
+    foreach ($paths as $path) {
+        $listsByPath[$path] = github_fetch_all_file_commits($owner, $repo, $path, $maxCommits);
+    }
+
+    $merged = github_merge_commit_histories($listsByPath);
+    if ($maxCommits !== null && count($merged) > $maxCommits) {
+        $merged = array_slice($merged, 0, $maxCommits);
+    }
+
+    return $merged;
+}
+
 function github_rest_request(string $method, string $url, ?string $token = null, ?array $jsonBody = null): array
 {
     if (!function_exists('curl_init')) {
@@ -972,7 +1079,7 @@ function github_fetch_file_contents_at_ref(string $owner, string $repo, string $
     return github_decode_content_payload(is_array($payload) ? $payload : null);
 }
 
-function github_fetch_file_commit_diff(string $owner, string $repo, string $path, string $hash): array
+function github_fetch_commit_api_response(string $owner, string $repo, string $hash): array
 {
     github_require_api_token();
 
@@ -1006,7 +1113,11 @@ function github_fetch_file_commit_diff(string $owner, string $repo, string $path
         throw new RuntimeException('GitHub returned an invalid commit response.');
     }
 
-    $fileChange = null;
+    return $commit;
+}
+
+function github_find_file_change_in_commit(array $commit, string $path): ?array
+{
     foreach ($commit['files'] ?? [] as $file) {
         if (!is_array($file)) {
             continue;
@@ -1015,11 +1126,21 @@ function github_fetch_file_commit_diff(string $owner, string $repo, string $path
         $filename = (string) ($file['filename'] ?? '');
         $previousFilename = (string) ($file['previous_filename'] ?? '');
         if ($filename === $path || $previousFilename === $path) {
-            $fileChange = $file;
-            break;
+            return $file;
         }
     }
 
+    return null;
+}
+
+function github_build_file_diff_from_commit(
+    array $commit,
+    string $owner,
+    string $repo,
+    string $path,
+    string $hash
+): array {
+    $fileChange = github_find_file_change_in_commit($commit, $path);
     if ($fileChange === null) {
         throw new RuntimeException('This commit does not include changes for the requested file.');
     }
@@ -1051,6 +1172,313 @@ function github_fetch_file_commit_diff(string $owner, string $repo, string $path
         'patch' => isset($fileChange['patch']) ? (string) $fileChange['patch'] : null,
         'before' => $before,
         'after' => $after,
+    ];
+}
+
+function github_fetch_file_commit_diff(string $owner, string $repo, string $path, string $hash): array
+{
+    $commit = github_fetch_commit_api_response($owner, $repo, $hash);
+
+    return github_build_file_diff_from_commit($commit, $owner, $repo, $path, $hash);
+}
+
+function github_fetch_file_commit_diffs(string $owner, string $repo, array $paths, string $hash): array
+{
+    $paths = array_values(array_unique($paths));
+    if ($paths === []) {
+        throw new RuntimeException('At least one repository file path is required.');
+    }
+
+    if (count($paths) === 1) {
+        return [github_fetch_file_commit_diff($owner, $repo, $paths[0], $hash)];
+    }
+
+    $commit = github_fetch_commit_api_response($owner, $repo, $hash);
+    $diffs = [];
+
+    foreach ($paths as $path) {
+        try {
+            $diffs[] = github_build_file_diff_from_commit($commit, $owner, $repo, $path, $hash);
+        } catch (RuntimeException $error) {
+            if (!str_contains($error->getMessage(), 'does not include changes')) {
+                throw $error;
+            }
+        }
+    }
+
+    if ($diffs === []) {
+        throw new RuntimeException('This commit does not include changes for any of the requested files.');
+    }
+
+    return $diffs;
+}
+
+function github_session_access_token(): string
+{
+    return trim((string) ($_SESSION[GITHUB_SESSION_TOKEN_KEY] ?? ''));
+}
+
+function github_require_authenticated_editor(): array
+{
+    $user = github_current_user();
+    $token = github_session_access_token();
+
+    if (!is_array($user) || $token === '') {
+        throw new RuntimeException('GitHub login is required to publish page edits.');
+    }
+
+    return [
+        'user' => $user,
+        'token' => $token,
+    ];
+}
+
+function github_encode_repo_path(string $path): string
+{
+    $parts = array_values(array_filter(
+        explode('/', str_replace('\\', '/', $path)),
+        static fn (string $part): bool => $part !== '',
+    ));
+
+    return implode('/', array_map('rawurlencode', $parts));
+}
+
+function github_sanitize_branch_segment(string $value): string
+{
+    $normalized = strtolower((string) preg_replace('/[^a-z0-9]+/', '-', $value));
+    $normalized = trim((string) $normalized, '-');
+
+    return $normalized !== '' ? $normalized : 'editor';
+}
+
+function github_rest_request_json(string $method, string $url, ?string $token, ?array $body = null): array
+{
+    $response = github_rest_request($method, $url, $token, $body);
+    $status = $response['status'];
+    $data = $response['data'];
+
+    if ($status >= 400) {
+        $message = is_array($data)
+            ? (string) ($data['message'] ?? 'GitHub API request failed.')
+            : 'GitHub API request failed.';
+        throw new RuntimeException($message);
+    }
+
+    if (!is_array($data)) {
+        throw new RuntimeException('GitHub returned an invalid JSON response.');
+    }
+
+    return $data;
+}
+
+function github_get_repository_default_branch(string $owner, string $repo, string $token): array
+{
+    $repository = github_rest_request_json(
+        'GET',
+        sprintf('https://api.github.com/repos/%s/%s', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+    );
+
+    $defaultBranch = trim((string) ($repository['default_branch'] ?? 'main'));
+    if ($defaultBranch === '') {
+        $defaultBranch = 'main';
+    }
+
+    $reference = github_rest_request_json(
+        'GET',
+        sprintf(
+            'https://api.github.com/repos/%s/%s/git/ref/heads/%s',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            rawurlencode($defaultBranch),
+        ),
+        $token,
+    );
+
+    $sha = trim((string) ($reference['object']['sha'] ?? ''));
+    if ($sha === '') {
+        throw new RuntimeException('Could not resolve the repository default branch.');
+    }
+
+    return [
+        'branch' => $defaultBranch,
+        'sha' => $sha,
+    ];
+}
+
+function github_get_file_metadata_on_branch(
+    string $owner,
+    string $repo,
+    string $path,
+    string $branch,
+    string $token,
+): ?array {
+    $url = sprintf(
+        'https://api.github.com/repos/%s/%s/contents/%s?ref=%s',
+        rawurlencode($owner),
+        rawurlencode($repo),
+        github_encode_repo_path($path),
+        rawurlencode($branch),
+    );
+
+    $response = github_rest_request('GET', $url, $token);
+    if ($response['status'] === 404) {
+        return null;
+    }
+
+    if ($response['status'] >= 400) {
+        $data = $response['data'];
+        $message = is_array($data)
+            ? (string) ($data['message'] ?? 'GitHub API request failed.')
+            : 'GitHub API request failed.';
+        throw new RuntimeException($message);
+    }
+
+    return is_array($response['data']) ? $response['data'] : null;
+}
+
+function github_create_branch_from_sha(
+    string $owner,
+    string $repo,
+    string $branchName,
+    string $sha,
+    string $token,
+): void {
+    github_rest_request_json(
+        'POST',
+        sprintf('https://api.github.com/repos/%s/%s/git/refs', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        [
+            'ref' => 'refs/heads/' . $branchName,
+            'sha' => $sha,
+        ],
+    );
+}
+
+function github_upsert_file_on_branch(
+    string $owner,
+    string $repo,
+    string $path,
+    string $branchName,
+    string $content,
+    string $commitMessage,
+    ?string $existingSha,
+    string $token,
+): array {
+    $payload = [
+        'message' => $commitMessage,
+        'content' => base64_encode($content),
+        'branch' => $branchName,
+    ];
+
+    if ($existingSha !== null && $existingSha !== '') {
+        $payload['sha'] = $existingSha;
+    }
+
+    return github_rest_request_json(
+        'PUT',
+        sprintf(
+            'https://api.github.com/repos/%s/%s/contents/%s',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            github_encode_repo_path($path),
+        ),
+        $token,
+        $payload,
+    );
+}
+
+function github_create_pull_request(
+    string $owner,
+    string $repo,
+    string $title,
+    string $headBranch,
+    string $baseBranch,
+    string $body,
+    string $token,
+): array {
+    return github_rest_request_json(
+        'POST',
+        sprintf('https://api.github.com/repos/%s/%s/pulls', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        [
+            'title' => $title,
+            'head' => $headBranch,
+            'base' => $baseBranch,
+            'body' => $body,
+            'maintainer_can_modify' => true,
+        ],
+    );
+}
+
+function github_create_page_edit_pull_request(
+    string $owner,
+    string $repo,
+    string $path,
+    string $content,
+    array $editor,
+    string $commitMessage,
+    string $prTitle,
+    string $prBody,
+): array {
+    $token = trim((string) ($editor['token'] ?? ''));
+    $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
+    $login = github_sanitize_branch_segment((string) ($user['login'] ?? 'editor'));
+
+    if ($token === '') {
+        throw new RuntimeException('GitHub login is required to publish page edits.');
+    }
+
+    if (strlen($content) > 2_000_000) {
+        throw new RuntimeException('The edited page is too large to publish.');
+    }
+
+    $base = github_get_repository_default_branch($owner, $repo, $token);
+    $baseBranch = $base['branch'];
+    $baseSha = $base['sha'];
+
+    $fileSlug = github_sanitize_branch_segment((string) pathinfo($path, PATHINFO_FILENAME));
+    $branchName = sprintf('edit/%s-%s-%s', $fileSlug, $login, gmdate('Ymd-His'));
+
+    github_create_branch_from_sha($owner, $repo, $branchName, $baseSha, $token);
+
+    $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $baseBranch, $token);
+    $existingSha = is_array($existingFile) ? (string) ($existingFile['sha'] ?? '') : null;
+
+    $commit = github_upsert_file_on_branch(
+        $owner,
+        $repo,
+        $path,
+        $branchName,
+        $content,
+        $commitMessage,
+        $existingSha,
+        $token,
+    );
+
+    $pullRequest = github_create_pull_request(
+        $owner,
+        $repo,
+        $prTitle,
+        $branchName,
+        $baseBranch,
+        $prBody,
+        $token,
+    );
+
+    return [
+        'branch' => $branchName,
+        'base_branch' => $baseBranch,
+        'commit' => [
+            'sha' => (string) ($commit['commit']['sha'] ?? ''),
+            'message' => $commitMessage,
+        ],
+        'pull_request' => [
+            'number' => (int) ($pullRequest['number'] ?? 0),
+            'title' => (string) ($pullRequest['title'] ?? $prTitle),
+            'url' => (string) ($pullRequest['html_url'] ?? ''),
+            'state' => (string) ($pullRequest['state'] ?? 'open'),
+        ],
     ];
 }
 
