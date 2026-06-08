@@ -25,6 +25,8 @@ if ($path === null || $hash === null) {
     ], 400);
 }
 
+github_ensure_file_api_authenticated();
+
 $repoConfig = github_repo_config();
 $owner = $repoConfig['owner'];
 $repo = $repoConfig['repo'];

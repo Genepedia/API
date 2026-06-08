@@ -26,12 +26,22 @@
    sudo find /var/www/genepedia -type d -exec chmod 755 {} \;
    sudo find /var/www/genepedia -type f -exec chmod 644 {} \;
 
-4. Test the session endpoint to confirm configuration:
+4. Configure GitHub API authentication for commit history (required):
 
-   curl -i -H "Origin: https://www.genepedia.org" 'https://api.shaunroselt.com/genepedia/github-session.php'
+   ./scripts/configure-github-api-token.sh
 
-   The JSON should include `"configured": true` once `GITHUB_CLIENT_SECRET`
-   is set and readable by PHP.
+   Or add `GITHUB_API_TOKEN` manually to `.env` on the server. Use a classic PAT
+   with `public_repo` scope, or a fine-grained PAT with Contents (Read) and
+   Metadata (Read) on `Genepedia/Genepedia`.
+
+5. Test configuration:
+
+   curl -s 'https://api.shaunroselt.com/genepedia/github-config.php'
+   curl -s 'https://api.shaunroselt.com/genepedia/github-file-commits.php?path=pages/home.html&limit=1'
+
+   `github-config.php` should report `"configured": true` under `api_auth`.
+   Without `GITHUB_API_TOKEN`, commit history requests hit the unauthenticated
+   60 requests/hour limit and fail with rate-limit errors.
 
 Security notes
 - Do NOT commit `.env` or your secret to version control.

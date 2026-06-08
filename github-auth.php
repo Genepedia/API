@@ -34,7 +34,8 @@ if (file_exists($envFile) && is_readable($envFile)) {
         }
 
         if ($key !== '') {
-            if (getenv($key) === false) {
+            $existing = getenv($key);
+            if ($existing === false || trim((string) $existing) === '') {
                 putenv(sprintf('%s=%s', $key, $value));
                 $_ENV[$key] = $value;
                 $_SERVER[$key] = $value;
@@ -477,9 +478,192 @@ function github_clear_session(): void
     unset($_SESSION[GITHUB_SESSION_USER_KEY], $_SESSION[GITHUB_SESSION_TOKEN_KEY], $_SESSION[GITHUB_SESSION_STATE_KEY], $_SESSION[GITHUB_SESSION_RETURN_TO_KEY]);
 }
 
+function github_env_value(string $name): string
+{
+    $value = getenv($name);
+    if ($value !== false && trim((string) $value) !== '') {
+        return trim((string) $value);
+    }
+
+    if (isset($_ENV[$name]) && trim((string) $_ENV[$name]) !== '') {
+        return trim((string) $_ENV[$name]);
+    }
+
+    if (isset($_SERVER[$name]) && trim((string) $_SERVER[$name]) !== '') {
+        return trim((string) $_SERVER[$name]);
+    }
+
+    return '';
+}
+
+function github_base64url_encode(string $data): string
+{
+    return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
+}
+
+function github_app_private_key(): string
+{
+    $inline = github_env_value('GITHUB_APP_PRIVATE_KEY');
+    if ($inline !== '') {
+        return str_replace(['\\n', '\n'], "\n", $inline);
+    }
+
+    $path = github_env_value('GITHUB_APP_PRIVATE_KEY_PATH');
+    if ($path !== '' && is_readable($path)) {
+        return trim((string) file_get_contents($path));
+    }
+
+    $defaultPath = __DIR__ . '/github-app-private-key.pem';
+    if (is_readable($defaultPath)) {
+        return trim((string) file_get_contents($defaultPath));
+    }
+
+    return '';
+}
+
+function github_create_app_jwt(string $appId, string $privateKey): string
+{
+    $now = time();
+    $header = github_base64url_encode((string) json_encode([
+        'alg' => 'RS256',
+        'typ' => 'JWT',
+    ], JSON_THROW_ON_ERROR));
+    $payload = github_base64url_encode((string) json_encode([
+        'iat' => $now - 60,
+        'exp' => $now + 540,
+        'iss' => $appId,
+    ], JSON_THROW_ON_ERROR));
+    $segments = $header . '.' . $payload;
+
+    $signature = '';
+    $signed = openssl_sign($segments, $signature, $privateKey, OPENSSL_ALGO_SHA256);
+    if (!$signed) {
+        throw new RuntimeException('Failed to sign GitHub App JWT.');
+    }
+
+    return $segments . '.' . github_base64url_encode($signature);
+}
+
+function github_fetch_installation_access_token(): string
+{
+    static $cached = ['token' => '', 'expires_at' => 0];
+
+    if ($cached['token'] !== '' && $cached['expires_at'] > time() + 120) {
+        return $cached['token'];
+    }
+
+    $appId = github_env_value('GITHUB_APP_ID');
+    $privateKey = github_app_private_key();
+    if ($appId === '' || $privateKey === '') {
+        return '';
+    }
+
+    $appJwt = github_create_app_jwt($appId, $privateKey);
+    $installationId = github_env_value('GITHUB_APP_INSTALLATION_ID');
+
+    if ($installationId === '') {
+        $repoConfig = github_repo_config();
+        $installationUrl = sprintf(
+            'https://api.github.com/repos/%s/%s/installation',
+            rawurlencode($repoConfig['owner']),
+            rawurlencode($repoConfig['repo'])
+        );
+        $installationResponse = github_rest_get($installationUrl, $appJwt);
+        if ($installationResponse['status'] >= 400) {
+            return '';
+        }
+
+        $installationId = trim((string) ($installationResponse['data']['id'] ?? ''));
+        if ($installationId === '') {
+            return '';
+        }
+    }
+
+    $tokenUrl = sprintf(
+        'https://api.github.com/app/installations/%s/access_tokens',
+        rawurlencode($installationId)
+    );
+    $tokenResponse = github_rest_post_json($tokenUrl, [], $appJwt);
+    $token = trim((string) ($tokenResponse['token'] ?? ''));
+    if ($token === '') {
+        return '';
+    }
+
+    $expiresAt = strtotime((string) ($tokenResponse['expires_at'] ?? ''));
+    $cached = [
+        'token' => $token,
+        'expires_at' => $expiresAt > 0 ? $expiresAt : time() + 3600,
+    ];
+
+    return $token;
+}
+
 function github_api_token(): string
 {
-    return trim((string) (getenv('GITHUB_API_TOKEN') ?: ''));
+    static $resolved = null;
+    if ($resolved !== null) {
+        return $resolved;
+    }
+
+    foreach (['GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'] as $name) {
+        $token = github_env_value($name);
+        if ($token !== '') {
+            return $resolved = $token;
+        }
+    }
+
+    $tokenFile = github_env_value('GITHUB_API_TOKEN_FILE');
+    if ($tokenFile !== '' && is_readable($tokenFile)) {
+        $token = trim((string) file_get_contents($tokenFile));
+        if ($token !== '') {
+            return $resolved = $token;
+        }
+    }
+
+    $appToken = github_fetch_installation_access_token();
+    if ($appToken !== '') {
+        return $resolved = $appToken;
+    }
+
+    return $resolved = '';
+}
+
+function github_api_token_configured(): bool
+{
+    return github_api_token() !== '';
+}
+
+function github_require_api_token(): string
+{
+    $token = github_api_token();
+    if ($token === '') {
+        throw new RuntimeException(
+            'Server GitHub API authentication is not configured. '
+            . 'Set GITHUB_API_TOKEN in the API .env file (recommended), '
+            . 'or configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY for GitHub App authentication.'
+        );
+    }
+
+    return $token;
+}
+
+function github_api_auth_status(): array
+{
+    $hasPat = github_env_value('GITHUB_API_TOKEN') !== ''
+        || github_env_value('GITHUB_TOKEN') !== ''
+        || github_env_value('GH_TOKEN') !== '';
+    $tokenFile = github_env_value('GITHUB_API_TOKEN_FILE');
+    $hasTokenFile = $tokenFile !== '' && is_readable($tokenFile);
+    $hasApp = github_env_value('GITHUB_APP_ID') !== '' && github_app_private_key() !== '';
+
+    return [
+        'configured' => github_api_token_configured(),
+        'method' => github_api_token_configured()
+            ? ($hasApp && !($hasPat || $hasTokenFile) ? 'github_app' : 'personal_access_token')
+            : null,
+        'personal_access_token' => $hasPat || $hasTokenFile,
+        'github_app' => $hasApp,
+    ];
 }
 
 function github_repo_config(): array
@@ -509,7 +693,7 @@ function github_validate_repo_file_path(string $path): ?string
     return $normalized;
 }
 
-function github_rest_get(string $url, ?string $token = null): array
+function github_rest_request(string $method, string $url, ?string $token = null, ?array $jsonBody = null): array
 {
     if (!function_exists('curl_init')) {
         throw new RuntimeException('PHP cURL is required for GitHub API requests.');
@@ -531,9 +715,13 @@ function github_rest_get(string $url, ?string $token = null): array
         $headers[] = 'Authorization: Bearer ' . $token;
     }
 
+    if ($jsonBody !== null) {
+        $headers[] = 'Content-Type: application/json';
+    }
+
     $responseHeaders = [];
-    curl_setopt_array($ch, [
-        CURLOPT_CUSTOMREQUEST => 'GET',
+    $options = [
+        CURLOPT_CUSTOMREQUEST => strtoupper($method),
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPHEADER => $headers,
         CURLOPT_FOLLOWLOCATION => false,
@@ -547,7 +735,13 @@ function github_rest_get(string $url, ?string $token = null): array
 
             return $length;
         },
-    ]);
+    ];
+
+    if ($jsonBody !== null) {
+        $options[CURLOPT_POSTFIELDS] = (string) json_encode($jsonBody, JSON_THROW_ON_ERROR);
+    }
+
+    curl_setopt_array($ch, $options);
 
     $raw = curl_exec($ch);
     if ($raw === false) {
@@ -567,6 +761,45 @@ function github_rest_get(string $url, ?string $token = null): array
         'data' => $decoded,
         'raw' => $raw,
     ];
+}
+
+function github_rest_get(string $url, ?string $token = null): array
+{
+    return github_rest_request('GET', $url, $token);
+}
+
+function github_rest_post_json(string $url, array $body = [], ?string $token = null): array
+{
+    $response = github_rest_request('POST', $url, $token, $body);
+    $status = $response['status'];
+    $data = $response['data'];
+
+    if ($status >= 400) {
+        $message = is_array($data)
+            ? (string) ($data['message'] ?? 'GitHub API request failed.')
+            : 'GitHub API request failed.';
+        throw new RuntimeException($message);
+    }
+
+    if (!is_array($data)) {
+        throw new RuntimeException('GitHub returned an invalid JSON response.');
+    }
+
+    return $data;
+}
+
+function github_rate_limit_message(array $response): string
+{
+    $data = $response['data'];
+    $message = is_array($data)
+        ? (string) ($data['message'] ?? 'GitHub API rate limit reached.')
+        : 'GitHub API rate limit reached.';
+
+    if (!github_api_token_configured()) {
+        return $message . ' Configure GITHUB_API_TOKEN on the API server for authenticated requests.';
+    }
+
+    return $message;
 }
 
 function github_normalize_commit_item(array $item): array
@@ -593,8 +826,30 @@ function github_normalize_commit_item(array $item): array
     ];
 }
 
+function github_ensure_file_api_authenticated(): void
+{
+    if (github_api_token_configured()) {
+        return;
+    }
+
+    github_json([
+        'ok' => false,
+        'error' => 'api_token_not_configured',
+        'message' => 'Server GitHub API authentication is not configured. '
+            . 'Set GITHUB_API_TOKEN in the API server .env file, '
+            . 'or configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY.',
+        'setup' => [
+            'recommended' => 'GITHUB_API_TOKEN',
+            'token_url' => 'https://github.com/settings/tokens',
+            'required_scopes' => ['public_repo (classic PAT)', 'Contents: Read + Metadata: Read (fine-grained PAT)'],
+        ],
+    ], 503);
+}
+
 function github_fetch_all_file_commits(string $owner, string $repo, string $path, ?int $maxCommits = null): array
 {
+    github_require_api_token();
+
     $commits = [];
     $perPage = ($maxCommits !== null && $maxCommits > 0 && $maxCommits < 100)
         ? $maxCommits
@@ -621,10 +876,7 @@ function github_fetch_all_file_commits(string $owner, string $repo, string $path
         }
 
         if ($status === 403) {
-            $message = is_array($batch)
-                ? (string) ($batch['message'] ?? 'GitHub API rate limit reached.')
-                : 'GitHub API rate limit reached.';
-            throw new RuntimeException($message);
+            throw new RuntimeException(github_rate_limit_message($response));
         }
 
         if ($status >= 400) {
@@ -722,6 +974,8 @@ function github_fetch_file_contents_at_ref(string $owner, string $repo, string $
 
 function github_fetch_file_commit_diff(string $owner, string $repo, string $path, string $hash): array
 {
+    github_require_api_token();
+
     $url = sprintf(
         'https://api.github.com/repos/%s/%s/commits/%s',
         rawurlencode($owner),
@@ -735,6 +989,10 @@ function github_fetch_file_commit_diff(string $owner, string $repo, string $path
 
     if ($status === 404) {
         throw new RuntimeException('Commit not found.');
+    }
+
+    if ($status === 403) {
+        throw new RuntimeException(github_rate_limit_message($response));
     }
 
     if ($status >= 400) {
