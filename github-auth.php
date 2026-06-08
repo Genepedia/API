@@ -291,11 +291,11 @@ function github_normalize_return_to(?string $value): string
     return $candidate;
 }
 
-function github_json(array $payload, int $status = 200): void
+function github_json(array $payload, int $status = 200, ?string $cacheControl = null): void
 {
     http_response_code($status);
     header('Content-Type: application/json; charset=utf-8');
-    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Cache-Control: ' . ($cacheControl ?? 'no-store, no-cache, must-revalidate, max-age=0'));
     echo json_encode($payload, JSON_UNESCAPED_SLASHES);
     exit;
 }
@@ -476,3 +476,181 @@ function github_clear_session(): void
 {
     unset($_SESSION[GITHUB_SESSION_USER_KEY], $_SESSION[GITHUB_SESSION_TOKEN_KEY], $_SESSION[GITHUB_SESSION_STATE_KEY], $_SESSION[GITHUB_SESSION_RETURN_TO_KEY]);
 }
+
+function github_api_token(): string
+{
+    return trim((string) (getenv('GITHUB_API_TOKEN') ?: ''));
+}
+
+function github_repo_config(): array
+{
+    $configured = trim((string) (getenv('GITHUB_REPO') ?: 'Genepedia/Genepedia'));
+    $parts = array_values(array_filter(explode('/', $configured), static fn ($part) => $part !== ''));
+
+    return [
+        'owner' => (string) ($parts[0] ?? 'Genepedia'),
+        'repo' => (string) ($parts[1] ?? 'Genepedia'),
+    ];
+}
+
+function github_validate_repo_file_path(string $path): ?string
+{
+    $normalized = str_replace('\\', '/', trim($path));
+    $normalized = ltrim($normalized, '/');
+
+    if ($normalized === '' || str_contains($normalized, '..')) {
+        return null;
+    }
+
+    if (!preg_match('#^(pages|people)/[a-zA-Z0-9_./-]+\.html$#', $normalized)) {
+        return null;
+    }
+
+    return $normalized;
+}
+
+function github_rest_get(string $url, ?string $token = null): array
+{
+    if (!function_exists('curl_init')) {
+        throw new RuntimeException('PHP cURL is required for GitHub API requests.');
+    }
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        throw new RuntimeException('Failed to initialize cURL.');
+    }
+
+    $headers = [
+        'Accept: application/vnd.github+json',
+        'User-Agent: Genepedia-GitHub-API',
+        'X-GitHub-Api-Version: 2022-11-28',
+    ];
+
+    $token = trim((string) ($token ?? github_api_token()));
+    if ($token !== '') {
+        $headers[] = 'Authorization: Bearer ' . $token;
+    }
+
+    $responseHeaders = [];
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => 'GET',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_FOLLOWLOCATION => false,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_HEADERFUNCTION => static function ($curl, string $headerLine) use (&$responseHeaders): int {
+            $length = strlen($headerLine);
+            $parts = explode(':', $headerLine, 2);
+            if (count($parts) === 2) {
+                $responseHeaders[strtolower(trim($parts[0]))] = trim($parts[1]);
+            }
+
+            return $length;
+        },
+    ]);
+
+    $raw = curl_exec($ch);
+    if ($raw === false) {
+        $message = curl_error($ch);
+        curl_close($ch);
+        throw new RuntimeException('GitHub request failed: ' . $message);
+    }
+
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+
+    $decoded = json_decode($raw, true);
+
+    return [
+        'status' => $status,
+        'headers' => $responseHeaders,
+        'data' => $decoded,
+        'raw' => $raw,
+    ];
+}
+
+function github_normalize_commit_item(array $item): array
+{
+    $message = trim((string) ($item['commit']['message'] ?? ''));
+    $subject = $message !== '' ? strtok($message, "\n") : 'No commit message';
+    if ($subject === false || $subject === '') {
+        $subject = 'No commit message';
+    }
+
+    $authorLogin = (string) ($item['author']['login'] ?? $item['committer']['login'] ?? '');
+    $authorUrl = trim((string) ($item['author']['html_url'] ?? $item['committer']['html_url'] ?? ''));
+    if ($authorUrl === '' && $authorLogin !== '') {
+        $authorUrl = 'https://github.com/' . rawurlencode($authorLogin);
+    }
+
+    return [
+        'hash' => (string) ($item['sha'] ?? ''),
+        'date' => (string) ($item['commit']['author']['date'] ?? $item['commit']['committer']['date'] ?? ''),
+        'author' => (string) ($item['commit']['author']['name'] ?? 'Unknown author'),
+        'author_login' => $authorLogin,
+        'author_url' => $authorUrl,
+        'subject' => $subject,
+    ];
+}
+
+function github_fetch_all_file_commits(string $owner, string $repo, string $path): array
+{
+    $commits = [];
+    $perPage = 100;
+    $page = 1;
+    $maxPages = 100;
+
+    while ($page <= $maxPages) {
+        $url = sprintf(
+            'https://api.github.com/repos/%s/%s/commits?path=%s&per_page=%d&page=%d',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            rawurlencode($path),
+            $perPage,
+            $page
+        );
+
+        $response = github_rest_get($url);
+        $status = $response['status'];
+        $batch = $response['data'];
+
+        if ($status === 404) {
+            return [];
+        }
+
+        if ($status === 403) {
+            $message = is_array($batch)
+                ? (string) ($batch['message'] ?? 'GitHub API rate limit reached.')
+                : 'GitHub API rate limit reached.';
+            throw new RuntimeException($message);
+        }
+
+        if ($status >= 400) {
+            $message = is_array($batch)
+                ? (string) ($batch['message'] ?? 'GitHub API request failed.')
+                : 'GitHub API request failed.';
+            throw new RuntimeException($message);
+        }
+
+        if (!is_array($batch) || $batch === []) {
+            break;
+        }
+
+        foreach ($batch as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $commits[] = github_normalize_commit_item($item);
+        }
+
+        if (count($batch) < $perPage) {
+            break;
+        }
+
+        $page++;
+    }
+
+    return $commits;
+}
+
