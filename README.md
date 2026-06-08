@@ -9,6 +9,7 @@ Shared API between Genepedia projects.
 - `github-session.php`
 - `github-logout.php`
 - `github-file-commits.php` — live file commit history for Genepedia pages (GitHub REST API proxy)
+- `github-file-commit-diff.php` — before/after file contents and unified diff for a single commit
 
 These endpoints are used by the shared `Web-Framework` header for GitHub authentication and sessions.
 `github-file-commits.php` powers the Changes tab on Genepedia pages.

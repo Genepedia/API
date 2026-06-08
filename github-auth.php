@@ -593,10 +593,12 @@ function github_normalize_commit_item(array $item): array
     ];
 }
 
-function github_fetch_all_file_commits(string $owner, string $repo, string $path): array
+function github_fetch_all_file_commits(string $owner, string $repo, string $path, ?int $maxCommits = null): array
 {
     $commits = [];
-    $perPage = 100;
+    $perPage = ($maxCommits !== null && $maxCommits > 0 && $maxCommits < 100)
+        ? $maxCommits
+        : 100;
     $page = 1;
     $maxPages = 100;
 
@@ -642,9 +644,17 @@ function github_fetch_all_file_commits(string $owner, string $repo, string $path
             }
 
             $commits[] = github_normalize_commit_item($item);
+
+            if ($maxCommits !== null && count($commits) >= $maxCommits) {
+                return $commits;
+            }
         }
 
         if (count($batch) < $perPage) {
+            break;
+        }
+
+        if ($maxCommits !== null && count($commits) >= $maxCommits) {
             break;
         }
 
@@ -652,5 +662,137 @@ function github_fetch_all_file_commits(string $owner, string $repo, string $path
     }
 
     return $commits;
+}
+
+function github_validate_commit_hash(string $hash): ?string
+{
+    $normalized = strtolower(trim($hash));
+    if (!preg_match('/^[a-f0-9]{40}$/', $normalized)) {
+        return null;
+    }
+
+    return $normalized;
+}
+
+function github_decode_content_payload(?array $payload): ?string
+{
+    if (!is_array($payload) || !array_key_exists('content', $payload)) {
+        return null;
+    }
+
+    $encoding = (string) ($payload['encoding'] ?? '');
+    $content = (string) ($payload['content'] ?? '');
+
+    if ($encoding === 'base64') {
+        $decoded = base64_decode(str_replace("\n", '', $content), true);
+
+        return $decoded === false ? null : $decoded;
+    }
+
+    return $content;
+}
+
+function github_fetch_file_contents_at_ref(string $owner, string $repo, string $path, string $ref): ?string
+{
+    $url = sprintf(
+        'https://api.github.com/repos/%s/%s/contents/%s?ref=%s',
+        rawurlencode($owner),
+        rawurlencode($repo),
+        rawurlencode($path),
+        rawurlencode($ref)
+    );
+
+    $response = github_rest_get($url);
+    $status = $response['status'];
+    $payload = $response['data'];
+
+    if ($status === 404) {
+        return null;
+    }
+
+    if ($status >= 400) {
+        $message = is_array($payload)
+            ? (string) ($payload['message'] ?? 'GitHub API request failed.')
+            : 'GitHub API request failed.';
+        throw new RuntimeException($message);
+    }
+
+    return github_decode_content_payload(is_array($payload) ? $payload : null);
+}
+
+function github_fetch_file_commit_diff(string $owner, string $repo, string $path, string $hash): array
+{
+    $url = sprintf(
+        'https://api.github.com/repos/%s/%s/commits/%s',
+        rawurlencode($owner),
+        rawurlencode($repo),
+        rawurlencode($hash)
+    );
+
+    $response = github_rest_get($url);
+    $status = $response['status'];
+    $commit = $response['data'];
+
+    if ($status === 404) {
+        throw new RuntimeException('Commit not found.');
+    }
+
+    if ($status >= 400) {
+        $message = is_array($commit)
+            ? (string) ($commit['message'] ?? 'GitHub API request failed.')
+            : 'GitHub API request failed.';
+        throw new RuntimeException($message);
+    }
+
+    if (!is_array($commit)) {
+        throw new RuntimeException('GitHub returned an invalid commit response.');
+    }
+
+    $fileChange = null;
+    foreach ($commit['files'] ?? [] as $file) {
+        if (!is_array($file)) {
+            continue;
+        }
+
+        $filename = (string) ($file['filename'] ?? '');
+        $previousFilename = (string) ($file['previous_filename'] ?? '');
+        if ($filename === $path || $previousFilename === $path) {
+            $fileChange = $file;
+            break;
+        }
+    }
+
+    if ($fileChange === null) {
+        throw new RuntimeException('This commit does not include changes for the requested file.');
+    }
+
+    $statusLabel = (string) ($fileChange['status'] ?? 'modified');
+    $beforePath = (string) ($fileChange['previous_filename'] ?? $path);
+    $afterPath = (string) ($fileChange['filename'] ?? $path);
+    $parentSha = (string) ($commit['parents'][0]['sha'] ?? '');
+
+    $before = null;
+    $after = null;
+
+    if ($statusLabel !== 'added' && $parentSha !== '') {
+        $before = github_fetch_file_contents_at_ref($owner, $repo, $beforePath, $parentSha);
+    }
+
+    if ($statusLabel !== 'removed') {
+        $after = github_fetch_file_contents_at_ref($owner, $repo, $afterPath, $hash);
+    }
+
+    return [
+        'path' => $path,
+        'hash' => $hash,
+        'status' => $statusLabel,
+        'before_path' => $beforePath,
+        'after_path' => $afterPath,
+        'additions' => (int) ($fileChange['additions'] ?? 0),
+        'deletions' => (int) ($fileChange['deletions'] ?? 0),
+        'patch' => isset($fileChange['patch']) ? (string) $fileChange['patch'] : null,
+        'before' => $before,
+        'after' => $after,
+    ];
 }
 

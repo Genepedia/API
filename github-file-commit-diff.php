@@ -15,11 +15,13 @@ if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
 }
 
 $path = github_validate_repo_file_path((string) ($_GET['path'] ?? ''));
-if ($path === null) {
+$hash = github_validate_commit_hash((string) ($_GET['hash'] ?? ''));
+
+if ($path === null || $hash === null) {
     github_json([
         'ok' => false,
-        'error' => 'invalid_path',
-        'message' => 'A valid repository file path is required.',
+        'error' => 'invalid_request',
+        'message' => 'A valid repository file path and commit hash are required.',
     ], 400);
 }
 
@@ -28,20 +30,13 @@ $owner = $repoConfig['owner'];
 $repo = $repoConfig['repo'];
 $repoSlug = $owner . '/' . $repo;
 
-$limit = null;
-if (isset($_GET['limit'])) {
-    $limit = max(1, min(100, (int) $_GET['limit']));
-}
-
 try {
-    $commits = github_fetch_all_file_commits($owner, $repo, $path, $limit);
+    $diff = github_fetch_file_commit_diff($owner, $repo, $path, $hash);
 
     github_json([
         'ok' => true,
-        'path' => $path,
         'repo' => $repoSlug,
-        'commits' => $commits,
-        'count' => count($commits),
+        'diff' => $diff,
         'fetched_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {
