@@ -10,12 +10,21 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 
 if [[ "${1:-}" == "" ]]; then
-  echo "Paste a GitHub personal access token with read and write access to the Genepedia repository."
+  echo "Paste a GitHub personal access token with WRITE access to Genepedia/Genepedia."
   echo "Create one at: https://github.com/settings/tokens"
-  echo "Classic PAT scope: public_repo"
-  echo "Fine-grained PAT: Contents (Read and write) + Pull requests (Read and write) + Metadata (Read) on Genepedia/Genepedia"
   echo
-  read -r -s -p "GITHUB_API_TOKEN: " TOKEN
+  echo "Fine-grained PAT:"
+  echo "  Repository access: Only select Genepedia/Genepedia"
+  echo "  Contents: Read and write"
+  echo "  Pull requests: Read and write"
+  echo "  Metadata: Read-only"
+  echo
+  echo "Classic PAT:"
+  echo "  Scope: public_repo"
+  echo
+  echo "If the Genepedia organization uses SSO, authorize the token after creating it."
+  echo
+  read -r -s -p "GITHUB_PUBLISH_TOKEN: " TOKEN
   echo
 else
   TOKEN="$1"
@@ -35,14 +44,12 @@ import sys
 env_path = pathlib.Path(sys.argv[1])
 token = sys.argv[2]
 lines = env_path.read_text(encoding="utf-8").splitlines()
-updated = False
 found = False
 output = []
 
 for line in lines:
-    if re.match(r"^\s*GITHUB_API_TOKEN=", line):
-        output.append(f"GITHUB_API_TOKEN={token}")
-        updated = True
+    if re.match(r"^\s*GITHUB_PUBLISH_TOKEN=", line):
+        output.append(f"GITHUB_PUBLISH_TOKEN={token}")
         found = True
     else:
         output.append(line)
@@ -50,9 +57,8 @@ for line in lines:
 if not found:
     if output and output[-1].strip() != "":
         output.append("")
-    output.append("# Server token for commit history and page publishing (5,000 GitHub API requests/hour)")
-    output.append(f"GITHUB_API_TOKEN={token}")
-    updated = True
+    output.append("# Server token for page publishing")
+    output.append(f"GITHUB_PUBLISH_TOKEN={token}")
 
 env_path.write_text("\n".join(output) + "\n", encoding="utf-8")
 print(f"Updated {env_path}")

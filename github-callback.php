@@ -23,6 +23,13 @@ if ($code === '') {
 
 try {
     $token = github_exchange_code($code);
+} catch (Throwable $exception) {
+    error_log('GitHub OAuth token exchange failed: ' . $exception->getMessage());
+    github_clear_session();
+    github_redirect($returnTo . (str_contains($returnTo, '?') ? '&' : '?') . 'github_auth_error=token_exchange');
+}
+
+try {
     $user = github_fetch_user($token);
 
     session_regenerate_id(true);
@@ -32,6 +39,7 @@ try {
 
     github_redirect($returnTo);
 } catch (Throwable $exception) {
+    error_log('GitHub OAuth user profile fetch failed: ' . $exception->getMessage());
     github_clear_session();
-    github_redirect($returnTo . (str_contains($returnTo, '?') ? '&' : '?') . 'github_auth_error=oauth_failed');
+    github_redirect($returnTo . (str_contains($returnTo, '?') ? '&' : '?') . 'github_auth_error=user_profile');
 }

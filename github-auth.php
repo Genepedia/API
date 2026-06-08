@@ -49,7 +49,6 @@ const GITHUB_SESSION_USER_KEY = 'github_user';
 const GITHUB_SESSION_TOKEN_KEY = 'github_access_token';
 const GITHUB_SESSION_STATE_KEY = 'github_oauth_state';
 const GITHUB_SESSION_RETURN_TO_KEY = 'github_oauth_return_to';
-const GITHUB_DEFAULT_CLIENT_ID = 'Ov23liPGTumhPzPYFhnh';
 
 function github_is_https_request(): bool
 {
@@ -125,15 +124,36 @@ function github_start_session(): void
     session_start();
 }
 
+function github_env_is_placeholder(string $value): bool
+{
+    $value = trim($value);
+    if ($value === '' || $value === 'FILL_IN') {
+        return true;
+    }
+
+    return str_starts_with($value, 'your_');
+}
+
+function github_oauth_uses_github_app(): bool
+{
+    if (github_app_configured()) {
+        return true;
+    }
+
+    $clientId = github_env_value('GITHUB_CLIENT_ID');
+
+    return str_starts_with($clientId, 'Iv1.');
+}
+
 function github_config(): array
 {
-    $clientId = trim((string) (getenv('GITHUB_CLIENT_ID') ?: GITHUB_DEFAULT_CLIENT_ID));
-    $clientSecret = trim((string) (getenv('GITHUB_CLIENT_SECRET') ?: ''));
+    $clientId = github_env_value('GITHUB_CLIENT_ID');
+    $clientSecret = github_env_value('GITHUB_CLIENT_SECRET');
 
     return [
         'client_id' => $clientId,
         'client_secret' => $clientSecret,
-        'scope' => GITHUB_OAUTH_SCOPE,
+        'scope' => github_oauth_uses_github_app() ? '' : GITHUB_OAUTH_SCOPE,
     ];
 }
 
@@ -328,15 +348,17 @@ function github_build_authorize_url(string $state, string $returnTo): string
     $_SESSION[GITHUB_SESSION_STATE_KEY] = $state;
     $_SESSION[GITHUB_SESSION_RETURN_TO_KEY] = $returnTo;
 
-    $query = http_build_query([
+    $params = [
         'client_id' => $config['client_id'],
         'redirect_uri' => github_callback_url(),
-        'scope' => $config['scope'],
         'state' => $state,
         'prompt' => 'select_account',
-    ]);
+    ];
+    if ($config['scope'] !== '') {
+        $params['scope'] = $config['scope'];
+    }
 
-    return 'https://github.com/login/oauth/authorize?' . $query;
+    return 'https://github.com/login/oauth/authorize?' . http_build_query($params);
 }
 
 function github_request_json(string $method, string $url, array $headers = [], ?array $body = null): array
@@ -422,18 +444,22 @@ function github_fetch_user(string $token): array
     ];
 
     $user = github_request_json('GET', 'https://api.github.com/user', $headers);
-    $emails = github_request_json('GET', 'https://api.github.com/user/emails', $headers);
 
-    $primaryEmail = '';
-    foreach ($emails as $email) {
-        if (!is_array($email)) {
-            continue;
-        }
+    $primaryEmail = trim((string) ($user['email'] ?? ''));
+    try {
+        $emails = github_request_json('GET', 'https://api.github.com/user/emails', $headers);
+        foreach ($emails as $email) {
+            if (!is_array($email)) {
+                continue;
+            }
 
-        if (!empty($email['primary']) && !empty($email['verified']) && !empty($email['email'])) {
-            $primaryEmail = (string) $email['email'];
-            break;
+            if (!empty($email['primary']) && !empty($email['verified']) && !empty($email['email'])) {
+                $primaryEmail = (string) $email['email'];
+                break;
+            }
         }
+    } catch (Throwable) {
+        // GitHub Apps need Account → Email addresses permission; login still works without it.
     }
 
     $displayName = trim((string) ($user['name'] ?? ''));
@@ -481,16 +507,25 @@ function github_clear_session(): void
 function github_env_value(string $name): string
 {
     $value = getenv($name);
-    if ($value !== false && trim((string) $value) !== '') {
-        return trim((string) $value);
+    if ($value !== false) {
+        $value = trim((string) $value);
+        if (!github_env_is_placeholder($value)) {
+            return $value;
+        }
     }
 
-    if (isset($_ENV[$name]) && trim((string) $_ENV[$name]) !== '') {
-        return trim((string) $_ENV[$name]);
+    if (isset($_ENV[$name])) {
+        $value = trim((string) $_ENV[$name]);
+        if (!github_env_is_placeholder($value)) {
+            return $value;
+        }
     }
 
-    if (isset($_SERVER[$name]) && trim((string) $_SERVER[$name]) !== '') {
-        return trim((string) $_SERVER[$name]);
+    if (isset($_SERVER[$name])) {
+        $value = trim((string) $_SERVER[$name]);
+        if (!github_env_is_placeholder($value)) {
+            return $value;
+        }
     }
 
     return '';
@@ -501,6 +536,33 @@ function github_base64url_encode(string $data): string
     return rtrim(strtr(base64_encode($data), '+/', '-_'), '=');
 }
 
+function github_resolve_api_path(string $path): string
+{
+    $path = trim($path);
+    if ($path === '') {
+        return '';
+    }
+
+    if ($path[0] === '/' || preg_match('#^[A-Za-z]:[/\\\\]#', $path) === 1) {
+        return $path;
+    }
+
+    return rtrim(__DIR__, '/') . '/' . ltrim($path, './');
+}
+
+function github_app_private_key_paths(): array
+{
+    $paths = [];
+    $configured = github_env_value('GITHUB_APP_PRIVATE_KEY_PATH');
+    if ($configured !== '') {
+        $paths[] = github_resolve_api_path($configured);
+    }
+
+    $paths[] = __DIR__ . '/github-app-private-key.pem';
+
+    return array_values(array_unique($paths));
+}
+
 function github_app_private_key(): string
 {
     $inline = github_env_value('GITHUB_APP_PRIVATE_KEY');
@@ -508,14 +570,10 @@ function github_app_private_key(): string
         return str_replace(['\\n', '\n'], "\n", $inline);
     }
 
-    $path = github_env_value('GITHUB_APP_PRIVATE_KEY_PATH');
-    if ($path !== '' && is_readable($path)) {
-        return trim((string) file_get_contents($path));
-    }
-
-    $defaultPath = __DIR__ . '/github-app-private-key.pem';
-    if (is_readable($defaultPath)) {
-        return trim((string) file_get_contents($defaultPath));
+    foreach (github_app_private_key_paths() as $path) {
+        if (is_readable($path)) {
+            return trim((string) file_get_contents($path));
+        }
     }
 
     return '';
@@ -544,7 +602,59 @@ function github_create_app_jwt(string $appId, string $privateKey): string
     return $segments . '.' . github_base64url_encode($signature);
 }
 
-function github_fetch_installation_access_token(): string
+function github_app_configured(): bool
+{
+    return github_env_value('GITHUB_APP_ID') !== '' && github_app_private_key() !== '';
+}
+
+function github_app_setup_status(): array
+{
+    $appId = github_env_value('GITHUB_APP_ID');
+    $pathConfig = github_env_value('GITHUB_APP_PRIVATE_KEY_PATH');
+    $resolvedPaths = github_app_private_key_paths();
+    $readablePath = null;
+
+    foreach ($resolvedPaths as $path) {
+        if (is_readable($path)) {
+            $readablePath = $path;
+            break;
+        }
+    }
+
+    $status = [
+        'app_id_set' => $appId !== '',
+        'app_id_looks_like_client_id' => str_starts_with($appId, 'Iv1.'),
+        'private_key_path' => $pathConfig !== '' ? $pathConfig : null,
+        'private_key_resolved_paths' => $resolvedPaths,
+        'private_key_readable' => $readablePath !== null,
+        'private_key_in_use' => $readablePath,
+        'configured' => github_app_configured(),
+        'installation_token_error' => null,
+    ];
+
+    if ($status['app_id_looks_like_client_id']) {
+        $status['installation_token_error'] =
+            'GITHUB_APP_ID looks like a Client ID (Iv1.). Use the numeric App ID instead.';
+    } elseif ($status['configured']) {
+        try {
+            $token = github_fetch_installation_access_token(true);
+            if ($token === '') {
+                $status['installation_token_error'] = 'GitHub App did not return an installation access token.';
+            }
+        } catch (Throwable $error) {
+            $status['installation_token_error'] = $error->getMessage();
+        }
+    } elseif (!$status['app_id_set']) {
+        $status['installation_token_error'] = 'GITHUB_APP_ID is missing from the server .env file.';
+    } elseif (!$status['private_key_readable']) {
+        $status['installation_token_error'] =
+            'Private key file is not readable. Upload github-app-private-key.pem next to the PHP files on the server.';
+    }
+
+    return $status;
+}
+
+function github_fetch_installation_access_token(bool $throwOnFailure = false): string
 {
     static $cached = ['token' => '', 'expires_at' => 0];
 
@@ -555,6 +665,12 @@ function github_fetch_installation_access_token(): string
     $appId = github_env_value('GITHUB_APP_ID');
     $privateKey = github_app_private_key();
     if ($appId === '' || $privateKey === '') {
+        if ($throwOnFailure) {
+            throw new RuntimeException(
+                'GitHub App authentication is not configured. Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH.'
+            );
+        }
+
         return '';
     }
 
@@ -570,11 +686,22 @@ function github_fetch_installation_access_token(): string
         );
         $installationResponse = github_rest_get($installationUrl, $appJwt);
         if ($installationResponse['status'] >= 400) {
+            $message = github_format_rest_error($installationResponse, 'GitHub App installation lookup');
+            if ($throwOnFailure) {
+                throw new RuntimeException(
+                    $message . ' Install the GitHub App on ' . $repoConfig['owner'] . '/' . $repoConfig['repo'] . '.'
+                );
+            }
+
             return '';
         }
 
         $installationId = trim((string) ($installationResponse['data']['id'] ?? ''));
         if ($installationId === '') {
+            if ($throwOnFailure) {
+                throw new RuntimeException('Could not resolve the GitHub App installation ID for this repository.');
+            }
+
             return '';
         }
     }
@@ -583,9 +710,23 @@ function github_fetch_installation_access_token(): string
         'https://api.github.com/app/installations/%s/access_tokens',
         rawurlencode($installationId)
     );
-    $tokenResponse = github_rest_post_json($tokenUrl, [], $appJwt);
+
+    try {
+        $tokenResponse = github_rest_post_json($tokenUrl, [], $appJwt);
+    } catch (RuntimeException $error) {
+        if ($throwOnFailure) {
+            throw $error;
+        }
+
+        return '';
+    }
+
     $token = trim((string) ($tokenResponse['token'] ?? ''));
     if ($token === '') {
+        if ($throwOnFailure) {
+            throw new RuntimeException('GitHub App did not return an installation access token.');
+        }
+
         return '';
     }
 
@@ -605,9 +746,16 @@ function github_api_token(): string
         return $resolved;
     }
 
+    if (github_app_configured()) {
+        $appToken = github_fetch_installation_access_token();
+        if ($appToken !== '') {
+            return $resolved = $appToken;
+        }
+    }
+
     foreach (['GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'] as $name) {
         $token = github_env_value($name);
-        if ($token !== '') {
+        if ($token !== '' && !str_starts_with($token, 'your_')) {
             return $resolved = $token;
         }
     }
@@ -654,13 +802,28 @@ function github_api_auth_status(): array
         || github_env_value('GH_TOKEN') !== '';
     $tokenFile = github_env_value('GITHUB_API_TOKEN_FILE');
     $hasTokenFile = $tokenFile !== '' && is_readable($tokenFile);
-    $hasApp = github_env_value('GITHUB_APP_ID') !== '' && github_app_private_key() !== '';
+    $hasApp = github_app_configured();
+    $configured = github_api_token_configured();
+    $method = null;
+
+    if ($configured) {
+        if ($hasApp) {
+            try {
+                $appToken = github_fetch_installation_access_token(true);
+                $method = $appToken !== '' ? 'github_app' : null;
+            } catch (Throwable $error) {
+                $method = 'github_app_error';
+            }
+        }
+
+        if ($method === null && ($hasPat || $hasTokenFile)) {
+            $method = 'personal_access_token';
+        }
+    }
 
     return [
-        'configured' => github_api_token_configured(),
-        'method' => github_api_token_configured()
-            ? ($hasApp && !($hasPat || $hasTokenFile) ? 'github_app' : 'personal_access_token')
-            : null,
+        'configured' => $configured,
+        'method' => $method,
         'personal_access_token' => $hasPat || $hasTokenFile,
         'github_app' => $hasApp,
     ];
@@ -943,12 +1106,16 @@ function github_ensure_file_api_authenticated(): void
         'ok' => false,
         'error' => 'api_token_not_configured',
         'message' => 'Server GitHub API authentication is not configured. '
-            . 'Set GITHUB_API_TOKEN in the API server .env file, '
-            . 'or configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY.',
+            . 'Set GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH in the API server .env file '
+            . 'and upload the .pem private key.',
         'setup' => [
-            'recommended' => 'GITHUB_API_TOKEN',
-            'token_url' => 'https://github.com/settings/tokens',
-            'required_scopes' => ['public_repo (classic PAT)', 'Contents: Read + Metadata: Read (fine-grained PAT)'],
+            'recommended' => 'GITHUB_APP_ID + GITHUB_APP_PRIVATE_KEY_PATH',
+            'app_url' => 'https://github.com/settings/apps',
+            'repository_permissions' => [
+                'Metadata' => 'Read-only',
+                'Contents' => 'Read and write',
+                'Pull requests' => 'Read and write',
+            ],
         ],
     ], 503);
 }
@@ -1251,21 +1418,63 @@ function github_editor_commit_identity(array $user): array
     ];
 }
 
-function github_resolve_page_edit_api_token(array $editor): string
+function github_publish_token_candidates(array $editor): array
 {
-    $serverToken = github_api_token();
-    if ($serverToken !== '') {
-        return $serverToken;
+    $candidates = [];
+    $seen = [];
+
+    $add = static function (string $token, string $source) use (&$candidates, &$seen): void {
+        $token = trim($token);
+        if ($token === '' || isset($seen[$token])) {
+            return;
+        }
+
+        $seen[$token] = true;
+        $candidates[] = [
+            'token' => $token,
+            'source' => $source,
+        ];
+    };
+
+    if (github_app_configured()) {
+        $add(github_fetch_installation_access_token(), 'github_app');
     }
 
-    $userToken = trim((string) ($editor['token'] ?? ''));
-    if ($userToken !== '') {
-        return $userToken;
+    $publishToken = github_env_value('GITHUB_PUBLISH_TOKEN');
+    if ($publishToken !== '' && !str_starts_with($publishToken, 'your_')) {
+        $add($publishToken, 'GITHUB_PUBLISH_TOKEN');
     }
 
-    throw new RuntimeException(
-        'Page publishing is not configured. Set GITHUB_API_TOKEN with repository write access on the API server.'
-    );
+    $add(trim((string) ($editor['token'] ?? '')), 'user_oauth');
+
+    foreach (['GITHUB_API_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN'] as $name) {
+        $token = github_env_value($name);
+        if ($token !== '' && !str_starts_with($token, 'your_')) {
+            $add($token, $name);
+        }
+    }
+
+    $tokenFile = github_env_value('GITHUB_API_TOKEN_FILE');
+    if ($tokenFile !== '' && is_readable($tokenFile)) {
+        $add(trim((string) file_get_contents($tokenFile)), 'GITHUB_API_TOKEN_FILE');
+    }
+
+    return $candidates;
+}
+
+function github_token_oauth_scopes(string $token): array
+{
+    $response = github_rest_request('GET', 'https://api.github.com/user', $token);
+    if ($response['status'] >= 400) {
+        return [];
+    }
+
+    $raw = trim((string) ($response['headers']['x-oauth-scopes'] ?? ''));
+    if ($raw === '') {
+        return [];
+    }
+
+    return array_values(array_filter(array_map('trim', explode(',', $raw))));
 }
 
 function github_token_repo_permissions(string $owner, string $repo, string $token): array
@@ -1281,37 +1490,133 @@ function github_token_repo_permissions(string $owner, string $repo, string $toke
     return is_array($repository['permissions'] ?? null) ? $repository['permissions'] : [];
 }
 
+function github_token_can_publish(string $owner, string $repo, string $token): bool
+{
+    try {
+        $permissions = github_token_repo_permissions($owner, $repo, $token);
+        if (!empty($permissions['push']) || !empty($permissions['admin']) || !empty($permissions['maintain'])) {
+            return true;
+        }
+    } catch (Throwable $error) {
+        // Fall through to scope-based checks.
+    }
+
+    foreach (github_token_oauth_scopes($token) as $scope) {
+        $normalized = strtolower($scope);
+        if ($normalized === 'repo' || $normalized === 'public_repo') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function github_build_publish_token_help_message(array $failures = []): string
+{
+    $repoConfig = github_repo_config();
+    $repoSlug = $repoConfig['owner'] . '/' . $repoConfig['repo'];
+    $lines = [
+        'No GitHub token available can write to ' . $repoSlug . '.',
+    ];
+
+    if (github_app_configured()) {
+        $lines[] = 'Check GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, and that the GitHub App is installed on ' . $repoSlug . ' with Contents and Pull requests write access.';
+    } else {
+        $lines = array_merge($lines, [
+            'Configure a GitHub App (recommended) or add GITHUB_PUBLISH_TOKEN with repository write access.',
+            '',
+            'GitHub App repository permissions:',
+            '- Contents: Read and write',
+            '- Pull requests: Read and write',
+            '- Metadata: Read-only',
+            '',
+            'Fine-grained PAT alternative:',
+            '- Repository access: only ' . $repoSlug,
+            '- Contents: Read and write',
+            '- Pull requests: Read and write',
+            '- Metadata: Read-only',
+            '',
+            'Classic PAT alternative: enable the public_repo scope.',
+        ]);
+    }
+
+    if ($failures !== []) {
+        $lines[] = '';
+        $lines[] = 'Checked tokens: ' . implode(' | ', $failures);
+    }
+
+    return implode("\n", $lines);
+}
+
+function github_resolve_page_edit_api_token(array $editor): string
+{
+    $repoConfig = github_repo_config();
+    $owner = $repoConfig['owner'];
+    $repo = $repoConfig['repo'];
+    $failures = [];
+
+    foreach (github_publish_token_candidates($editor) as $candidate) {
+        if (!github_token_can_publish($owner, $repo, $candidate['token'])) {
+            $failures[] = $candidate['source'] . ' lacks write access';
+            continue;
+        }
+
+        return $candidate['token'];
+    }
+
+    throw new RuntimeException(github_build_publish_token_help_message($failures));
+}
+
 function github_publish_auth_status(): array
 {
-    $token = github_api_token();
-    if ($token === '') {
+    $editor = [
+        'token' => github_session_access_token(),
+    ];
+    $repoConfig = github_repo_config();
+    $owner = $repoConfig['owner'];
+    $repo = $repoConfig['repo'];
+    $candidates = github_publish_token_candidates($editor);
+
+    if ($candidates === []) {
+        $message = github_app_configured()
+            ? 'GitHub App is configured but no installation token is available. Check the private key and that the app is installed on the repository.'
+            : 'Configure GITHUB_APP_ID and GITHUB_APP_PRIVATE_KEY_PATH, or set GITHUB_PUBLISH_TOKEN with repository write access.';
+
         return [
             'configured' => false,
             'can_publish' => false,
-            'message' => 'Set GITHUB_API_TOKEN with Contents and Pull requests write access.',
+            'active_token_source' => null,
+            'candidates' => [],
+            'message' => $message,
         ];
     }
 
-    $repoConfig = github_repo_config();
-    try {
-        $permissions = github_token_repo_permissions($repoConfig['owner'], $repoConfig['repo'], $token);
-    } catch (Throwable $error) {
-        return [
-            'configured' => true,
-            'can_publish' => false,
-            'message' => $error->getMessage(),
+    $checked = [];
+    $activeSource = null;
+
+    foreach ($candidates as $candidate) {
+        $canPublish = github_token_can_publish($owner, $repo, $candidate['token']);
+        $checked[] = [
+            'source' => $candidate['source'],
+            'can_publish' => $canPublish,
         ];
+        if ($canPublish && $activeSource === null) {
+            $activeSource = $candidate['source'];
+        }
     }
 
-    $canPublish = !empty($permissions['push']) || !empty($permissions['admin']) || !empty($permissions['maintain']);
+    $canPublish = $activeSource !== null;
 
     return [
         'configured' => true,
         'can_publish' => $canPublish,
-        'permissions' => $permissions,
+        'active_token_source' => $activeSource,
+        'candidates' => $checked,
         'message' => $canPublish
-            ? 'Server API token can create branches, commits, and pull requests.'
-            : 'GITHUB_API_TOKEN can read the repository but needs write access to publish page edits.',
+            ? 'Publishing will use ' . $activeSource . '.'
+            : (github_app_configured()
+                ? 'GitHub App token cannot write to the repository. Grant Contents and Pull requests write access and reinstall the app.'
+                : 'No configured token can write to the repository. Configure a GitHub App or add GITHUB_PUBLISH_TOKEN with Contents and Pull requests write access.'),
     ];
 }
 
@@ -1526,7 +1831,8 @@ function github_create_pull_request(
     );
 }
 
-function github_create_page_edit_pull_request(
+function github_create_page_edit_pull_request_with_token(
+    string $token,
     string $owner,
     string $repo,
     string $path,
@@ -1536,19 +1842,9 @@ function github_create_page_edit_pull_request(
     string $prTitle,
     string $prBody,
 ): array {
-    $token = github_resolve_page_edit_api_token($editor);
     $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
     $login = github_sanitize_branch_segment((string) ($user['login'] ?? 'editor'));
     $commitIdentity = github_editor_commit_identity($user);
-
-    if (strlen($content) > 2_000_000) {
-        throw new RuntimeException('The edited page is too large to publish.');
-    }
-
-    $publishStatus = github_publish_auth_status();
-    if (($publishStatus['configured'] ?? false) && !($publishStatus['can_publish'] ?? false)) {
-        throw new RuntimeException((string) ($publishStatus['message'] ?? 'GITHUB_API_TOKEN cannot publish page edits.'));
-    }
 
     $base = github_get_repository_default_branch($owner, $repo, $token);
     $baseBranch = $base['branch'];
@@ -1604,5 +1900,59 @@ function github_create_page_edit_pull_request(
             'state' => (string) ($pullRequest['state'] ?? 'open'),
         ],
     ];
+}
+
+function github_is_publish_auth_failure(RuntimeException $error): bool
+{
+    $message = $error->getMessage();
+
+    return str_contains($message, 'HTTP 403')
+        || str_contains($message, 'HTTP 401')
+        || str_contains($message, 'Resource not accessible by personal access token');
+}
+
+function github_create_page_edit_pull_request(
+    string $owner,
+    string $repo,
+    string $path,
+    string $content,
+    array $editor,
+    string $commitMessage,
+    string $prTitle,
+    string $prBody,
+): array {
+    if (strlen($content) > 2_000_000) {
+        throw new RuntimeException('The edited page is too large to publish.');
+    }
+
+    $failures = [];
+    foreach (github_publish_token_candidates($editor) as $candidate) {
+        if (!github_token_can_publish($owner, $repo, $candidate['token'])) {
+            $failures[] = $candidate['source'] . ' lacks write access';
+            continue;
+        }
+
+        try {
+            return github_create_page_edit_pull_request_with_token(
+                $candidate['token'],
+                $owner,
+                $repo,
+                $path,
+                $content,
+                $editor,
+                $commitMessage,
+                $prTitle,
+                $prBody,
+            );
+        } catch (RuntimeException $error) {
+            if (!github_is_publish_auth_failure($error)) {
+                throw $error;
+            }
+
+            $failures[] = $candidate['source'] . ': ' . $error->getMessage();
+        }
+    }
+
+    throw new RuntimeException(github_build_publish_token_help_message($failures));
 }
 
