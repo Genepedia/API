@@ -31,13 +31,16 @@ try {
 
 try {
     $user = github_fetch_user($token);
+    github_apply_welcome_login_actions($token);
 
     session_regenerate_id(true);
     $_SESSION[GITHUB_SESSION_TOKEN_KEY] = $token;
     $_SESSION[GITHUB_SESSION_USER_KEY] = $user;
     unset($_SESSION[GITHUB_SESSION_STATE_KEY], $_SESSION[GITHUB_SESSION_RETURN_TO_KEY]);
 
-    github_redirect($returnTo);
+    $handoffCode = github_create_login_handoff($user, $token);
+    $separator = str_contains($returnTo, '?') ? '&' : '?';
+    github_redirect($returnTo . $separator . 'github_handoff=' . rawurlencode($handoffCode));
 } catch (Throwable $exception) {
     error_log('GitHub OAuth user profile fetch failed: ' . $exception->getMessage());
     github_clear_session();

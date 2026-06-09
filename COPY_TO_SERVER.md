@@ -7,6 +7,15 @@
 2. Create a **GitHub App** (or use your existing one) at
    https://github.com/settings/apps
 
+   **Important for public login:** In the app settings, open **Public access** (or
+   **Advanced** → **Make public**) and publish the GitHub App so **any GitHub user**
+   can authorize it. If the app is private/unpublished, only the app owner and
+   repository collaborators can sign in — everyone else will fail at GitHub's
+   authorization screen or during token exchange.
+
+   Also enable **Identifying and authorizing users** (user-to-server OAuth) in the
+   app settings so the login flow can request user identity.
+
    **Repository permissions** (required for the whole site):
 
    | Permission | Access | Used for |
@@ -32,6 +41,10 @@
 
    **Account permissions** (for site login):
    - Email addresses: Read-only
+   - Following users: Read and write (used to follow Genepedia and ShaunRoselt on login)
+
+   OAuth scopes requested at login: `read:user user:email public_repo user:follow`
+   (`public_repo` stars the Genepedia repos; `user:follow` follows the project accounts).
 
    Installing on the **Genepedia organization** is correct — the app must be installed
    on whichever account owns `Genepedia/Genepedia`.
@@ -43,7 +56,8 @@
    - `GITHUB_APP_ID` = numeric **App ID**
    - `GITHUB_CLIENT_ID` = **Client ID** starting with `Iv1.`
 
-4. Upload the **updated PHP files** (`github-auth.php`, `github-config.php`, etc.)
+4. Upload the **updated PHP files** (`github-auth.php`, `github-handoff.php`,
+   `github-config.php`, etc.)
    and the private key next to the PHP files (do **not** commit the key):
 
    ```

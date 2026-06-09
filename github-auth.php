@@ -44,11 +44,12 @@ if (file_exists($envFile) && is_readable($envFile)) {
     }
 }
 
-const GITHUB_OAUTH_SCOPE = 'read:user user:email public_repo';
+const GITHUB_OAUTH_SCOPE = 'read:user user:email public_repo user:follow';
 const GITHUB_SESSION_USER_KEY = 'github_user';
 const GITHUB_SESSION_TOKEN_KEY = 'github_access_token';
 const GITHUB_SESSION_STATE_KEY = 'github_oauth_state';
 const GITHUB_SESSION_RETURN_TO_KEY = 'github_oauth_return_to';
+const GITHUB_HANDOFF_TTL_SECONDS = 180;
 
 function github_is_https_request(): bool
 {
@@ -153,7 +154,7 @@ function github_config(): array
     return [
         'client_id' => $clientId,
         'client_secret' => $clientSecret,
-        'scope' => github_oauth_uses_github_app() ? '' : GITHUB_OAUTH_SCOPE,
+        'scope' => GITHUB_OAUTH_SCOPE,
     ];
 }
 
@@ -245,7 +246,7 @@ function github_apply_cors(): void
         header('Access-Control-Allow-Origin: ' . $origin);
         header('Access-Control-Allow-Credentials: true');
         header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
-        header('Access-Control-Allow-Headers: Accept, Content-Type');
+        header('Access-Control-Allow-Headers: Accept, Content-Type, Authorization');
         header('Vary: Origin');
     }
 
@@ -436,6 +437,117 @@ function github_exchange_code(string $code): string
     return $token;
 }
 
+function github_env_csv_list(string $name, array $defaults): array
+{
+    $raw = trim(github_env_value($name));
+    if ($raw === '') {
+        return $defaults;
+    }
+
+    $items = [];
+    foreach (preg_split('/\s*,\s*/', $raw) ?: [] as $entry) {
+        $value = trim((string) $entry);
+        if ($value !== '') {
+            $items[] = $value;
+        }
+    }
+
+    return $items !== [] ? array_values(array_unique($items)) : $defaults;
+}
+
+function github_welcome_actions_enabled(): bool
+{
+    $flag = strtolower(trim(github_env_value('GITHUB_WELCOME_ACTIONS')));
+    return !in_array($flag, ['0', 'false', 'no', 'off'], true);
+}
+
+function github_welcome_star_repos(): array
+{
+    return github_env_csv_list('GITHUB_WELCOME_STAR_REPOS', []);
+}
+
+function github_welcome_follow_users(): array
+{
+    return github_env_csv_list('GITHUB_WELCOME_FOLLOW_USERS', []);
+}
+
+function github_star_repository(string $owner, string $repo, string $token): void
+{
+    $response = github_rest_request(
+        'PUT',
+        sprintf(
+            'https://api.github.com/user/starred/%s/%s',
+            rawurlencode($owner),
+            rawurlencode($repo),
+        ),
+        $token,
+    );
+
+    $status = (int) ($response['status'] ?? 0);
+    if ($status === 204 || $status === 304) {
+        return;
+    }
+
+    throw new RuntimeException(github_format_rest_error($response, 'Star repository'));
+}
+
+function github_follow_user(string $login, string $token): void
+{
+    $response = github_rest_request(
+        'PUT',
+        sprintf('https://api.github.com/user/following/%s', rawurlencode($login)),
+        $token,
+    );
+
+    $status = (int) ($response['status'] ?? 0);
+    if ($status === 204) {
+        return;
+    }
+
+    throw new RuntimeException(github_format_rest_error($response, 'Follow user'));
+}
+
+function github_apply_welcome_login_actions(string $token): void
+{
+    if (!github_welcome_actions_enabled()) {
+        return;
+    }
+
+    foreach (github_welcome_star_repos() as $repoSlug) {
+        $parts = array_values(array_filter(explode('/', trim($repoSlug), 2), static fn ($part) => $part !== ''));
+        if (count($parts) !== 2) {
+            continue;
+        }
+
+        try {
+            github_star_repository($parts[0], $parts[1], $token);
+        } catch (Throwable $error) {
+            error_log(sprintf(
+                'GitHub welcome star failed for %s: %s',
+                $repoSlug,
+                $error->getMessage(),
+            ));
+        }
+    }
+
+    foreach (github_welcome_follow_users() as $login) {
+        $normalizedLogin = trim($login);
+        if ($normalizedLogin === '') {
+            continue;
+        }
+
+        try {
+            github_follow_user($normalizedLogin, $token);
+        } catch (Throwable $error) {
+            error_log(sprintf(
+                'GitHub welcome follow failed for %s: %s',
+                $normalizedLogin,
+                $error->getMessage(),
+            ));
+        }
+    }
+}
+
 function github_fetch_user(string $token): array
 {
     $headers = [
@@ -493,10 +605,126 @@ function github_fetch_user(string $token): array
     ];
 }
 
+function github_request_bearer_token(): string
+{
+    $header = (string) ($_SERVER['HTTP_AUTHORIZATION'] ?? '');
+    if ($header === '' && isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+        $header = (string) $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+    }
+
+    if (preg_match('/^\s*Bearer\s+(\S+)/i', $header, $matches) === 1) {
+        return trim($matches[1]);
+    }
+
+    return '';
+}
+
+function github_handoff_cache_dir(): string
+{
+    return rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . 'genepedia-github-handoff';
+}
+
+function github_cleanup_handoff_cache(): void
+{
+    $dir = github_handoff_cache_dir();
+    if (!is_dir($dir)) {
+        return;
+    }
+
+    $cutoff = time() - GITHUB_HANDOFF_TTL_SECONDS;
+    foreach (glob($dir . DIRECTORY_SEPARATOR . '*.json') ?: [] as $path) {
+        if (!is_file($path)) {
+            continue;
+        }
+
+        if ((int) @filemtime($path) < $cutoff) {
+            @unlink($path);
+        }
+    }
+}
+
+function github_create_login_handoff(array $user, string $token): string
+{
+    github_cleanup_handoff_cache();
+
+    $code = bin2hex(random_bytes(32));
+    $dir = github_handoff_cache_dir();
+    if (!is_dir($dir) && !mkdir($dir, 0700, true) && !is_dir($dir)) {
+        throw new RuntimeException('Could not create the login handoff cache directory.');
+    }
+
+    $payload = [
+        'user' => $user,
+        'token' => $token,
+        'expires_at' => time() + GITHUB_HANDOFF_TTL_SECONDS,
+    ];
+
+    $path = $dir . DIRECTORY_SEPARATOR . hash('sha256', $code) . '.json';
+    if (file_put_contents($path, (string) json_encode($payload, JSON_UNESCAPED_SLASHES), LOCK_EX) === false) {
+        throw new RuntimeException('Could not persist the login handoff code.');
+    }
+
+    return $code;
+}
+
+function github_consume_login_handoff(string $code): ?array
+{
+    $normalized = trim($code);
+    if ($normalized === '' || !preg_match('/^[a-f0-9]{64}$/', $normalized)) {
+        return null;
+    }
+
+    $path = github_handoff_cache_dir() . DIRECTORY_SEPARATOR . hash('sha256', $normalized) . '.json';
+    if (!is_readable($path)) {
+        return null;
+    }
+
+    $payload = json_decode((string) file_get_contents($path), true);
+    @unlink($path);
+
+    if (!is_array($payload)) {
+        return null;
+    }
+
+    $expiresAt = (int) ($payload['expires_at'] ?? 0);
+    $user = $payload['user'] ?? null;
+    $token = trim((string) ($payload['token'] ?? ''));
+    if ($expiresAt < time() || !is_array($user) || $token === '') {
+        return null;
+    }
+
+    return [
+        'user' => $user,
+        'token' => $token,
+    ];
+}
+
 function github_current_user(): ?array
 {
-    $user = $_SESSION[GITHUB_SESSION_USER_KEY] ?? null;
-    return is_array($user) ? $user : null;
+    $sessionUser = $_SESSION[GITHUB_SESSION_USER_KEY] ?? null;
+    $sessionToken = trim((string) ($_SESSION[GITHUB_SESSION_TOKEN_KEY] ?? ''));
+    if (is_array($sessionUser) && $sessionToken !== '') {
+        return $sessionUser;
+    }
+
+    $bearer = github_request_bearer_token();
+    if ($bearer === '') {
+        return is_array($sessionUser) ? $sessionUser : null;
+    }
+
+    static $bearerUsers = [];
+    if (isset($bearerUsers[$bearer])) {
+        return $bearerUsers[$bearer];
+    }
+
+    try {
+        $user = github_fetch_user($bearer);
+        $bearerUsers[$bearer] = $user;
+
+        return $user;
+    } catch (Throwable) {
+        return null;
+    }
 }
 
 function github_clear_session(): void
@@ -1382,7 +1610,12 @@ function github_fetch_file_commit_diffs(string $owner, string $repo, array $path
 
 function github_session_access_token(): string
 {
-    return trim((string) ($_SESSION[GITHUB_SESSION_TOKEN_KEY] ?? ''));
+    $sessionToken = trim((string) ($_SESSION[GITHUB_SESSION_TOKEN_KEY] ?? ''));
+    if ($sessionToken !== '') {
+        return $sessionToken;
+    }
+
+    return github_request_bearer_token();
 }
 
 function github_require_authenticated_editor(): array
