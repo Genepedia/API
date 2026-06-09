@@ -491,8 +491,176 @@ function github_star_repository(string $owner, string $repo, string $token): voi
     throw new RuntimeException(github_format_rest_error($response, 'Star repository'));
 }
 
+function github_lookup_github_login(string $login): array
+{
+    $response = github_rest_get(sprintf(
+        'https://api.github.com/users/%s',
+        rawurlencode($login),
+    ));
+
+    if ($response['status'] >= 400 || !is_array($response['data'])) {
+        throw new RuntimeException(github_format_rest_error($response, 'GitHub account lookup'));
+    }
+
+    return $response['data'];
+}
+
+function github_graphql_request(string $query, string $token, array $variables = []): array
+{
+    $body = ['query' => $query];
+    if ($variables !== []) {
+        $body['variables'] = $variables;
+    }
+
+    $response = github_rest_request('POST', 'https://api.github.com/graphql', $token, $body);
+    $status = (int) ($response['status'] ?? 0);
+    $data = $response['data'];
+
+    if ($status >= 400) {
+        throw new RuntimeException(github_format_rest_error($response, 'GitHub GraphQL request'));
+    }
+
+    if (!is_array($data)) {
+        throw new RuntimeException('GitHub returned an invalid GraphQL response.');
+    }
+
+    if (isset($data['errors']) && is_array($data['errors']) && $data['errors'] !== []) {
+        $messages = [];
+        foreach ($data['errors'] as $error) {
+            if (!is_array($error)) {
+                continue;
+            }
+
+            $message = trim((string) ($error['message'] ?? ''));
+            if ($message !== '') {
+                $messages[] = $message;
+            }
+        }
+
+        throw new RuntimeException($messages !== []
+            ? implode(' ', array_values(array_unique($messages)))
+            : 'GitHub GraphQL request failed.');
+    }
+
+    return $data;
+}
+
+function github_is_following_via_rest(string $login, string $token): bool
+{
+    $response = github_rest_request(
+        'GET',
+        sprintf('https://api.github.com/user/following/%s', rawurlencode($login)),
+        $token,
+    );
+
+    $status = (int) ($response['status'] ?? 0);
+    if ($status === 204 || $status === 304) {
+        return true;
+    }
+
+    if ($status === 404) {
+        return false;
+    }
+
+    throw new RuntimeException(github_format_rest_error($response, 'Check follow status'));
+}
+
+function github_graphql_organization_follow_state(string $login, string $token): array
+{
+    $payload = github_graphql_request(
+        <<<'GRAPHQL'
+        query OrganizationFollowState($login: String!) {
+          organization(login: $login) {
+            id
+            login
+            viewerIsFollowing
+          }
+        }
+        GRAPHQL,
+        $token,
+        ['login' => $login],
+    );
+
+    $organization = $payload['data']['organization'] ?? null;
+    if (!is_array($organization)) {
+        throw new RuntimeException('Could not resolve organization ' . $login . ' for follow.');
+    }
+
+    return $organization;
+}
+
+function github_follow_organization_via_graphql(string $login, string $organizationId, string $token): void
+{
+    $payload = github_graphql_request(
+        <<<'GRAPHQL'
+        mutation FollowOrganization($organizationId: ID!) {
+          followOrganization(input: { organizationId: $organizationId }) {
+            organization {
+              login
+              viewerIsFollowing
+            }
+          }
+        }
+        GRAPHQL,
+        $token,
+        ['organizationId' => $organizationId],
+    );
+
+    if (($payload['data']['followOrganization'] ?? null) === null) {
+        throw new RuntimeException('GitHub followOrganization returned no result for ' . $login . '.');
+    }
+
+    $organization = $payload['data']['followOrganization']['organization'] ?? null;
+    if (is_array($organization) && !empty($organization['viewerIsFollowing'])) {
+        return;
+    }
+
+    $verified = github_graphql_organization_follow_state($login, $token);
+    if (!empty($verified['viewerIsFollowing'])) {
+        return;
+    }
+
+    throw new RuntimeException('GitHub did not confirm the organization follow for ' . $login . '.');
+}
+
+function github_follow_organization(string $login, string $token): void
+{
+    $state = github_graphql_organization_follow_state($login, $token);
+    if (!empty($state['viewerIsFollowing'])) {
+        return;
+    }
+
+    try {
+        if (github_is_following_via_rest($login, $token)) {
+            return;
+        }
+    } catch (Throwable) {
+        // REST follow checks are unavailable for some organization accounts.
+    }
+
+    try {
+        github_follow_user($login, $token);
+        if (github_is_following_via_rest($login, $token)) {
+            return;
+        }
+    } catch (Throwable) {
+        // REST follow is not supported for all organization logins.
+    }
+
+    $organizationId = trim((string) ($state['id'] ?? ''));
+    if ($organizationId === '') {
+        throw new RuntimeException('Could not resolve an organization ID for ' . $login . '.');
+    }
+
+    github_follow_organization_via_graphql($login, $organizationId, $token);
+}
+
 function github_follow_user(string $login, string $token): void
 {
+    if (github_is_following_via_rest($login, $token)) {
+        return;
+    }
+
     $response = github_rest_request(
         'PUT',
         sprintf('https://api.github.com/user/following/%s', rawurlencode($login)),
@@ -500,11 +668,24 @@ function github_follow_user(string $login, string $token): void
     );
 
     $status = (int) ($response['status'] ?? 0);
-    if ($status === 204) {
+    if ($status === 204 || $status === 304) {
         return;
     }
 
     throw new RuntimeException(github_format_rest_error($response, 'Follow user'));
+}
+
+function github_follow_account(string $login, string $token): void
+{
+    $account = github_lookup_github_login($login);
+    $type = trim((string) ($account['type'] ?? ''));
+
+    if (strcasecmp($type, 'Organization') === 0) {
+        github_follow_organization($login, $token);
+        return;
+    }
+
+    github_follow_user($login, $token);
 }
 
 function github_apply_welcome_login_actions(string $token): void
@@ -537,7 +718,7 @@ function github_apply_welcome_login_actions(string $token): void
         }
 
         try {
-            github_follow_user($normalizedLogin, $token);
+            github_follow_account($normalizedLogin, $token);
         } catch (Throwable $error) {
             error_log(sprintf(
                 'GitHub welcome follow failed for %s: %s',
@@ -1217,9 +1398,15 @@ function github_rest_request(string $method, string $url, ?string $token = null,
         $headers[] = 'Content-Type: application/json';
     }
 
+    $normalizedMethod = strtoupper($method);
+    $usesEmptyBody = $jsonBody === null && in_array($normalizedMethod, ['PUT', 'DELETE'], true);
+    if ($usesEmptyBody) {
+        $headers[] = 'Content-Length: 0';
+    }
+
     $responseHeaders = [];
     $options = [
-        CURLOPT_CUSTOMREQUEST => strtoupper($method),
+        CURLOPT_CUSTOMREQUEST => $normalizedMethod,
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_HTTPHEADER => $headers,
         CURLOPT_FOLLOWLOCATION => false,
@@ -1237,6 +1424,8 @@ function github_rest_request(string $method, string $url, ?string $token = null,
 
     if ($jsonBody !== null) {
         $options[CURLOPT_POSTFIELDS] = (string) json_encode($jsonBody, JSON_THROW_ON_ERROR);
+    } elseif ($usesEmptyBody) {
+        $options[CURLOPT_POSTFIELDS] = '';
     }
 
     curl_setopt_array($ch, $options);

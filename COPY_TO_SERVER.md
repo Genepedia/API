@@ -39,12 +39,18 @@
    - Generate a **Client secret** → `GITHUB_CLIENT_SECRET`
    - Generate a **Private key** (.pem) and download it
 
-   **Account permissions** (for site login):
+   **Account permissions** (for welcome actions after login):
    - Email addresses: Read-only
-   - Following users: Read and write (used to follow Genepedia and ShaunRoselt on login)
+   - Starring: Read and write (auto-star repos from `GITHUB_WELCOME_STAR_REPOS`)
+   - Followers: Read and write (auto-follow users from `GITHUB_WELCOME_FOLLOW_USERS`)
 
-   OAuth scopes requested at login: `read:user user:email public_repo user:follow`
-   (`public_repo` stars the Genepedia repos; `user:follow` follows the project accounts).
+   GitHub App user tokens use these app permissions (not classic OAuth scopes).
+   After adding Starring or Followers permissions, existing users must sign in again
+   so GitHub issues a fresh user access token.
+
+   Organization accounts in `GITHUB_WELCOME_FOLLOW_USERS` (for example `Genepedia`)
+   are followed via the GraphQL `followOrganization` mutation because the REST
+   follow endpoint only supports user accounts.
 
    Installing on the **Genepedia organization** is correct — the app must be installed
    on whichever account owns `Genepedia/Genepedia`.

@@ -27,12 +27,14 @@ with Contents and Pull requests write access, install it on the repository, and 
 server). Use the app's Client ID and a client secret for `GITHUB_CLIENT_ID` /
 `GITHUB_CLIENT_SECRET` so users can sign in with GitHub OAuth.
 
-GitHub login requests `read:user user:email public_repo user:follow`. After a successful
-login, the API best-effort stars repos and follows users listed in `.env`
-(`GITHUB_WELCOME_STAR_REPOS`, `GITHUB_WELCOME_FOLLOW_USERS`). Set `GITHUB_WELCOME_ACTIONS=0`
-to disable that behavior. Server-side API calls (commit history and publishing) use the
-GitHub App installation token when configured. PAT fallbacks (`GITHUB_API_TOKEN`,
-`GITHUB_PUBLISH_TOKEN`) are optional.
+After a successful login, the API best-effort stars repos and follows accounts listed
+in `.env` (`GITHUB_WELCOME_STAR_REPOS`, `GITHUB_WELCOME_FOLLOW_USERS`). User accounts
+are followed through the REST API; organization accounts use the GraphQL
+`followOrganization` mutation. Set `GITHUB_WELCOME_ACTIONS=0` to disable that behavior.
+The GitHub App needs account permissions for Starring and Followers (read and write).
+Server-side API calls (commit history and publishing) use the GitHub App installation
+token when configured. PAT fallbacks (`GITHUB_API_TOKEN`, `GITHUB_PUBLISH_TOKEN`) are
+optional.
 
 The `.env` file and private keys are ignored and should not be committed.
 See `COPY_TO_SERVER.md` for full deployment steps.
