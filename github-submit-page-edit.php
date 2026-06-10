@@ -30,35 +30,89 @@ if (!is_array($payload)) {
     ], 400);
 }
 
-$path = github_validate_repo_file_path((string) ($payload['path'] ?? ''));
-$content = (string) ($payload['content'] ?? '');
 $commitMessage = trim((string) ($payload['commit_message'] ?? ''));
 $prTitle = trim((string) ($payload['pr_title'] ?? ''));
 $prBody = trim((string) ($payload['pr_body'] ?? ''));
 
-if ($path === null || !str_starts_with($path, 'pages/')) {
+// Normalise the request into a list of files. Clients send either the legacy
+// single {path, content} pair or a files array for multi-file edits (for
+// example a profile fragment together with its infobox include).
+$rawFiles = [];
+if (is_array($payload['files'] ?? null) && $payload['files'] !== []) {
+    foreach ($payload['files'] as $entry) {
+        if (is_array($entry)) {
+            $rawFiles[] = [
+                'path' => (string) ($entry['path'] ?? ''),
+                'content' => (string) ($entry['content'] ?? ''),
+            ];
+        }
+    }
+} else {
+    $rawFiles[] = [
+        'path' => (string) ($payload['path'] ?? ''),
+        'content' => (string) ($payload['content'] ?? ''),
+    ];
+}
+
+if ($rawFiles === [] || count($rawFiles) > 5) {
     github_json([
         'ok' => false,
-        'error' => 'invalid_path',
-        'message' => 'A valid pages/*.html repository path is required.',
+        'error' => 'invalid_files',
+        'message' => 'Between one and five files can be published per edit.',
     ], 400);
 }
 
-if ($content === '') {
-    github_json([
-        'ok' => false,
-        'error' => 'invalid_content',
-        'message' => 'Page content is required.',
-    ], 400);
+$files = [];
+foreach ($rawFiles as $entry) {
+    $path = github_validate_repo_file_path($entry['path']);
+    $content = $entry['content'];
+
+    $isPagePath = $path !== null && str_starts_with($path, 'pages/');
+    $isPeoplePath = $path !== null
+        && preg_match('#^people/[a-zA-Z0-9_-]+/(profile\.html|data/[a-zA-Z0-9_.-]+\.html)$#', $path) === 1;
+
+    if ($path === null || (!$isPagePath && !$isPeoplePath)) {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_path',
+            'message' => 'A valid pages/*.html or people/<id>/(data/)*.html repository path is required.',
+        ], 400);
+    }
+
+    if ($content === '') {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_content',
+            'message' => 'Page content is required for ' . $path . '.',
+        ], 400);
+    }
+
+    $looksLikeFullDocument = str_contains(strtolower($content), '<html')
+        || str_contains(strtolower($content), '<!doctype');
+
+    // Profile data files are HTML fragments; everything else must be a full document.
+    $isFragmentPath = $isPeoplePath && str_contains($path, '/data/');
+    if (!$isFragmentPath && !$looksLikeFullDocument) {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_content',
+            'message' => 'Published content must be a complete HTML document.',
+        ], 400);
+    }
+
+    if ($isFragmentPath && !str_contains($content, '<')) {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_content',
+            'message' => 'Published content must contain HTML.',
+        ], 400);
+    }
+
+    $files[] = ['path' => $path, 'content' => $content];
 }
 
-if (!str_contains(strtolower($content), '<html') && !str_contains(strtolower($content), '<!doctype')) {
-    github_json([
-        'ok' => false,
-        'error' => 'invalid_content',
-        'message' => 'Published content must be a complete HTML document.',
-    ], 400);
-}
+$path = $files[0]['path'];
+$content = $files[0]['content'];
 
 try {
     $editor = github_require_authenticated_editor();
@@ -87,31 +141,54 @@ if ($prTitle === '') {
     $prTitle = $commitMessage;
 }
 
+$allPaths = array_map(static fn (array $file): string => $file['path'], $files);
+
 if ($prBody === '') {
+    $pathList = implode(', ', array_map(static fn (string $p): string => '`' . $p . '`', $allPaths));
     $prBody = implode("\n", [
-        'This pull request updates `' . $path . '` using the site page editor.',
+        'This pull request updates ' . $pathList . ' using the site page editor.',
         '',
         'Edited by ' . ($displayName !== '' ? $displayName : $login)
             . ($login !== '' ? ' (@' . $login . ')' : '') . '.',
     ]);
+} else {
+    // Make sure each path is referenced so pending-edit lookups can match it.
+    foreach ($allPaths as $editedPath) {
+        if (!str_contains($prBody, '`' . $editedPath . '`')) {
+            $prBody .= "\n\nFile: `" . $editedPath . '`';
+        }
+    }
 }
 
 try {
-    $result = github_create_page_edit_pull_request(
-        $owner,
-        $repo,
-        $path,
-        $content,
-        $editor,
-        $commitMessage,
-        $prTitle,
-        $prBody,
-    );
+    if (count($files) > 1) {
+        $result = github_create_files_edit_pull_request(
+            $owner,
+            $repo,
+            $files,
+            $editor,
+            $commitMessage,
+            $prTitle,
+            $prBody,
+        );
+    } else {
+        $result = github_create_page_edit_pull_request(
+            $owner,
+            $repo,
+            $path,
+            $content,
+            $editor,
+            $commitMessage,
+            $prTitle,
+            $prBody,
+        );
+    }
 
     github_json([
         'ok' => true,
         'repo' => $repoSlug,
         'path' => $path,
+        'paths' => $allPaths,
         'branch' => $result['branch'],
         'base_branch' => $result['base_branch'],
         'commit' => $result['commit'],

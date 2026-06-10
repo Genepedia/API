@@ -39,7 +39,7 @@ try {
         ]);
     }
 
-    $paths = github_parse_repo_file_paths_request() ?? [];
+    $paths = github_parse_repo_history_paths_request() ?? [];
     $pullRequests = github_fetch_open_pull_requests($owner, $repo, true, $paths);
 
     github_json([

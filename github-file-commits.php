@@ -14,7 +14,7 @@ if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) !== 'GET') {
     ], 405);
 }
 
-$paths = github_parse_repo_file_paths_request();
+$paths = github_parse_repo_history_paths_request();
 if ($paths === null) {
     github_json([
         'ok' => false,

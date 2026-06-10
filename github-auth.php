@@ -1702,6 +1702,11 @@ function github_fetch_commit_api_response(string $owner, string $repo, string $h
 
 function github_find_file_change_in_commit(array $commit, string $path): ?array
 {
+    // Paths without an extension are treated as directories (for example
+    // people/15/data/images) and match any file they contain.
+    $isDirectory = pathinfo($path, PATHINFO_EXTENSION) === '';
+    $directoryPrefix = rtrim($path, '/') . '/';
+
     foreach ($commit['files'] ?? [] as $file) {
         if (!is_array($file)) {
             continue;
@@ -1712,9 +1717,25 @@ function github_find_file_change_in_commit(array $commit, string $path): ?array
         if ($filename === $path || $previousFilename === $path) {
             return $file;
         }
+
+        if ($isDirectory
+            && (str_starts_with($filename, $directoryPrefix) || str_starts_with($previousFilename, $directoryPrefix))) {
+            return $file;
+        }
     }
 
     return null;
+}
+
+function github_path_is_binary_asset(string $path): bool
+{
+    $extension = strtolower((string) pathinfo($path, PATHINFO_EXTENSION));
+
+    return in_array($extension, [
+        'jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'ico', 'bmp',
+        'pdf', 'zip', 'gz', 'woff', 'woff2', 'ttf', 'eot', 'otf',
+        'mp3', 'mp4', 'webm', 'mov',
+    ], true);
 }
 
 function github_build_file_diff_from_commit(
@@ -1736,17 +1757,18 @@ function github_build_file_diff_from_commit(
 
     $before = null;
     $after = null;
+    $isBinary = github_path_is_binary_asset($afterPath !== '' ? $afterPath : $beforePath);
 
-    if ($statusLabel !== 'added' && $parentSha !== '') {
+    if (!$isBinary && $statusLabel !== 'added' && $parentSha !== '') {
         $before = github_fetch_file_contents_at_ref($owner, $repo, $beforePath, $parentSha);
     }
 
-    if ($statusLabel !== 'removed') {
+    if (!$isBinary && $statusLabel !== 'removed') {
         $after = github_fetch_file_contents_at_ref($owner, $repo, $afterPath, $hash);
     }
 
     return [
-        'path' => $path,
+        'path' => $afterPath !== '' ? $afterPath : $path,
         'hash' => $hash,
         'status' => $statusLabel,
         'before_path' => $beforePath,
@@ -2453,6 +2475,13 @@ function github_pull_request_summary_matches_paths(array $summary, array $paths)
             return true;
         }
 
+        // Directory paths (e.g. people/15/data/images) match any file inside them.
+        if ($pagePath !== ''
+            && pathinfo($path, PATHINFO_EXTENSION) === ''
+            && str_starts_with($pagePath, $path . '/')) {
+            return true;
+        }
+
         $fileSlug = github_sanitize_branch_segment((string) pathinfo($path, PATHINFO_FILENAME));
         $ref = strtolower(trim((string) ($summary['head']['ref'] ?? '')));
         if ($fileSlug !== '' && str_starts_with($ref, 'edit/' . $fileSlug . '-')) {
@@ -2504,7 +2533,7 @@ function github_is_page_editor_pull_request(array $pullRequest): bool
     $head = is_array($pullRequest['head'] ?? null) ? $pullRequest['head'] : [];
     $ref = trim((string) ($head['ref'] ?? ''));
 
-    return str_starts_with($ref, 'edit/');
+    return str_starts_with($ref, 'edit/') || str_starts_with($ref, 'media/');
 }
 
 function github_fetch_open_pull_requests(
@@ -2601,12 +2630,13 @@ function github_build_file_diff_from_pr_file(
     $beforePath = (string) ($file['previous_filename'] ?? $afterPath);
     $before = null;
     $after = null;
+    $isBinary = github_path_is_binary_asset($afterPath !== '' ? $afterPath : $beforePath);
 
-    if ($statusLabel !== 'added' && $baseSha !== '') {
+    if (!$isBinary && $statusLabel !== 'added' && $baseSha !== '') {
         $before = github_fetch_file_contents_at_ref($owner, $repo, $beforePath, $baseSha);
     }
 
-    if ($statusLabel !== 'removed' && $headSha !== '') {
+    if (!$isBinary && $statusLabel !== 'removed' && $headSha !== '') {
         $after = github_fetch_file_contents_at_ref($owner, $repo, $afterPath, $headSha);
     }
 
@@ -2735,3 +2765,690 @@ function github_review_pull_request(string $owner, string $repo, int $number, st
     throw new RuntimeException(github_build_publish_token_help_message($failures));
 }
 
+
+// ---------------------------------------------------------------------------
+// People profiles: shared helpers for media uploads and talk pages
+// ---------------------------------------------------------------------------
+
+const GITHUB_MEDIA_MAX_BYTES = 8_000_000;
+const GITHUB_MEDIA_ALLOWED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg'];
+const GITHUB_TALK_MAX_MESSAGE_LENGTH = 5000;
+const GITHUB_TALK_MAX_MESSAGES = 2000;
+
+function github_validate_person_id(string $personId): ?string
+{
+    $personId = trim($personId);
+    if ($personId === '' || !preg_match('/^[a-zA-Z0-9_-]{1,64}$/', $personId)) {
+        return null;
+    }
+
+    return $personId;
+}
+
+/**
+ * Path validation for read-only history/diff lookups. Accepts the page-editor
+ * .html paths plus profile data files (talk.json, *.ged) and the per-person
+ * data/images directory so media commits show up on the Changes tab.
+ */
+function github_validate_repo_history_path(string $path): ?string
+{
+    $normalized = str_replace('\\', '/', trim($path));
+    $normalized = ltrim($normalized, '/');
+
+    if ($normalized === '' || str_contains($normalized, '..')) {
+        return null;
+    }
+
+    if (preg_match('#^(pages|people)/[a-zA-Z0-9_./-]+\.(html|json|ged)$#', $normalized)) {
+        return $normalized;
+    }
+
+    if (preg_match('#^people/[a-zA-Z0-9_-]+/data/images$#', $normalized)) {
+        return $normalized;
+    }
+
+    return null;
+}
+
+function github_parse_repo_history_paths_request(): ?array
+{
+    if (isset($_GET['paths'])) {
+        $raw = trim((string) $_GET['paths']);
+        if ($raw === '') {
+            return null;
+        }
+
+        $paths = [];
+        foreach (preg_split('/\s*,\s*/', $raw) ?: [] as $part) {
+            $validated = github_validate_repo_history_path((string) $part);
+            if ($validated === null) {
+                return null;
+            }
+
+            $paths[] = $validated;
+        }
+
+        return $paths !== [] ? array_values(array_unique($paths)) : null;
+    }
+
+    if (!isset($_GET['path'])) {
+        return null;
+    }
+
+    $validated = github_validate_repo_history_path((string) $_GET['path']);
+    return $validated !== null ? [$validated] : null;
+}
+
+function github_fetch_person_profile_config(string $owner, string $repo, string $personId): array
+{
+    $path = 'people/' . $personId . '/profile.json';
+    $base = github_get_repository_default_branch($owner, $repo, github_api_token());
+    $content = github_fetch_file_contents_at_ref($owner, $repo, $path, $base['branch']);
+    if ($content === null) {
+        return [];
+    }
+
+    $decoded = json_decode($content, true);
+    return is_array($decoded) ? $decoded : [];
+}
+
+function github_person_profile_logins(array $profileConfig): array
+{
+    $logins = [];
+
+    $creatorLogin = trim((string) ($profileConfig['creator']['githubLogin'] ?? ''));
+    if ($creatorLogin !== '') {
+        $logins[] = strtolower($creatorLogin);
+    }
+
+    $maintainers = $profileConfig['maintainers'] ?? [];
+    if (is_array($maintainers)) {
+        foreach ($maintainers as $maintainer) {
+            $login = trim((string) ($maintainer['githubLogin'] ?? ''));
+            if ($login !== '') {
+                $logins[] = strtolower($login);
+            }
+        }
+    }
+
+    return array_values(array_unique($logins));
+}
+
+function github_person_can_manage(array $profileConfig, ?array $user): bool
+{
+    if (!is_array($user)) {
+        return false;
+    }
+
+    $login = strtolower(trim((string) ($user['login'] ?? '')));
+    if ($login === '') {
+        return false;
+    }
+
+    if (github_user_can_review_pull_requests($user)) {
+        return true;
+    }
+
+    return in_array($login, github_person_profile_logins($profileConfig), true);
+}
+
+function github_validate_media_filename(string $filename): ?string
+{
+    $filename = strtolower(trim(basename(str_replace('\\', '/', $filename))));
+    $filename = preg_replace('/\s+/', '-', $filename) ?? '';
+    $filename = preg_replace('/[^a-z0-9._-]/', '', $filename) ?? '';
+    $filename = trim($filename, '.-');
+
+    if ($filename === '' || strlen($filename) > 100 || str_contains($filename, '..')) {
+        return null;
+    }
+
+    $extension = strtolower((string) pathinfo($filename, PATHINFO_EXTENSION));
+    if (!in_array($extension, GITHUB_MEDIA_ALLOWED_EXTENSIONS, true)) {
+        return null;
+    }
+
+    return $filename;
+}
+
+function github_list_person_media(string $owner, string $repo, string $personId): array
+{
+    $base = github_get_repository_default_branch($owner, $repo, github_api_token());
+    $url = sprintf(
+        'https://api.github.com/repos/%s/%s/contents/%s?ref=%s',
+        rawurlencode($owner),
+        rawurlencode($repo),
+        github_encode_repo_path('people/' . $personId . '/data/images'),
+        rawurlencode($base['branch']),
+    );
+
+    $response = github_rest_get($url);
+    if ($response['status'] === 404) {
+        return [];
+    }
+
+    if ($response['status'] >= 400) {
+        throw new RuntimeException(github_format_rest_error($response, 'Media listing'));
+    }
+
+    $entries = is_array($response['data']) ? $response['data'] : [];
+    $images = [];
+
+    foreach ($entries as $entry) {
+        if (!is_array($entry) || (string) ($entry['type'] ?? '') !== 'file') {
+            continue;
+        }
+
+        $name = (string) ($entry['name'] ?? '');
+        $extension = strtolower((string) pathinfo($name, PATHINFO_EXTENSION));
+        if (!in_array($extension, GITHUB_MEDIA_ALLOWED_EXTENSIONS, true)) {
+            continue;
+        }
+
+        $images[] = [
+            'name' => $name,
+            'path' => (string) ($entry['path'] ?? ''),
+            'size' => (int) ($entry['size'] ?? 0),
+            'sha' => (string) ($entry['sha'] ?? ''),
+            'download_url' => (string) ($entry['download_url'] ?? ''),
+        ];
+    }
+
+    usort($images, static fn (array $a, array $b): int => strcmp($a['name'], $b['name']));
+
+    return $images;
+}
+
+function github_encode_ref_for_raw(string $value): string
+{
+    return implode('/', array_map('rawurlencode', explode('/', $value)));
+}
+
+/**
+ * Open media pull requests (uploads/removals awaiting review) for a person.
+ * Each entry carries enough to preview the proposed image from the PR branch.
+ */
+function github_person_media_pending(string $owner, string $repo, string $personId): array
+{
+    $imagesDir = 'people/' . $personId . '/data/images';
+    $pullRequests = github_fetch_open_pull_requests($owner, $repo, true, [$imagesDir]);
+    $entries = [];
+
+    foreach ($pullRequests as $pullRequest) {
+        $ref = (string) ($pullRequest['head']['ref'] ?? '');
+        if (!str_starts_with($ref, 'media/')) {
+            continue;
+        }
+
+        $path = (string) ($pullRequest['page_path'] ?? '');
+        if ($path === '' || !str_starts_with($path, $imagesDir . '/')) {
+            continue;
+        }
+
+        $action = str_starts_with($ref, 'media/delete-') ? 'delete' : 'upload';
+        $imageUrl = sprintf(
+            'https://raw.githubusercontent.com/%s/%s/%s/%s',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            github_encode_ref_for_raw($ref),
+            github_encode_ref_for_raw($path),
+        );
+
+        $entries[] = [
+            'number' => (int) ($pullRequest['number'] ?? 0),
+            'action' => $action,
+            'filename' => basename($path),
+            'path' => $path,
+            'branch' => $ref,
+            'image_url' => $action === 'upload' ? $imageUrl : '',
+            'url' => (string) ($pullRequest['url'] ?? ''),
+            'user' => $pullRequest['user'] ?? null,
+            'created_at' => (string) ($pullRequest['created_at'] ?? ''),
+            'updated_at' => (string) ($pullRequest['updated_at'] ?? ''),
+        ];
+    }
+
+    return $entries;
+}
+
+/**
+ * Confirms a pull request is a media PR that touches the given person, so a
+ * profile maintainer may only approve/decline edits for their own profile.
+ */
+function github_pull_request_is_person_media(array $pullRequest, string $personId): bool
+{
+    $head = is_array($pullRequest['head'] ?? null) ? $pullRequest['head'] : [];
+    $ref = (string) ($head['ref'] ?? '');
+    if (!str_starts_with($ref, 'media/')) {
+        return false;
+    }
+
+    $imagesDir = 'people/' . $personId . '/data/images';
+    $bodyPath = github_extract_page_path_from_pull_request_body($pullRequest);
+    if ($bodyPath !== '' && str_starts_with($bodyPath, $imagesDir . '/')) {
+        return true;
+    }
+
+    return false;
+}
+
+function github_delete_file_on_branch(
+    string $owner,
+    string $repo,
+    string $path,
+    string $branchName,
+    string $commitMessage,
+    string $sha,
+    string $token,
+    ?array $commitIdentity = null,
+): array {
+    $payload = [
+        'message' => $commitMessage,
+        'sha' => $sha,
+        'branch' => $branchName,
+    ];
+
+    if (is_array($commitIdentity)) {
+        $payload['author'] = $commitIdentity;
+        $payload['committer'] = $commitIdentity;
+    }
+
+    return github_rest_request_json(
+        'DELETE',
+        sprintf(
+            'https://api.github.com/repos/%s/%s/contents/%s',
+            rawurlencode($owner),
+            rawurlencode($repo),
+            github_encode_repo_path($path),
+        ),
+        $token,
+        $payload,
+        'Delete file',
+    );
+}
+
+function github_create_person_media_pull_request_with_token(
+    string $token,
+    string $owner,
+    string $repo,
+    string $action,
+    string $path,
+    ?string $binaryContent,
+    array $editor,
+    string $commitMessage,
+    string $prTitle,
+    string $prBody,
+): array {
+    $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
+    $login = github_sanitize_branch_segment((string) ($user['login'] ?? 'editor'));
+    $commitIdentity = github_editor_commit_identity($user);
+
+    $base = github_get_repository_default_branch($owner, $repo, $token);
+    $baseBranch = $base['branch'];
+    $baseSha = $base['sha'];
+
+    $fileSlug = github_sanitize_branch_segment((string) pathinfo($path, PATHINFO_FILENAME));
+    $branchName = sprintf('media/%s-%s-%s-%s', $action, $fileSlug, $login, gmdate('Ymd-His'));
+
+    github_create_branch_from_sha($owner, $repo, $branchName, $baseSha, $token);
+
+    $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $branchName, $token);
+    if ($existingFile === null) {
+        $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $baseBranch, $token);
+    }
+    $existingSha = is_array($existingFile) ? (string) ($existingFile['sha'] ?? '') : '';
+
+    if ($action === 'delete') {
+        if ($existingSha === '') {
+            throw new RuntimeException('The requested image could not be found in the repository.');
+        }
+
+        $commit = github_delete_file_on_branch(
+            $owner,
+            $repo,
+            $path,
+            $branchName,
+            $commitMessage,
+            $existingSha,
+            $token,
+            $commitIdentity,
+        );
+    } else {
+        $commit = github_upsert_file_on_branch(
+            $owner,
+            $repo,
+            $path,
+            $branchName,
+            (string) $binaryContent,
+            $commitMessage,
+            $existingSha !== '' ? $existingSha : null,
+            $token,
+            $commitIdentity,
+        );
+    }
+
+    $pullRequest = github_create_pull_request(
+        $owner,
+        $repo,
+        $prTitle,
+        $branchName,
+        $baseBranch,
+        $prBody,
+        $token,
+    );
+
+    return [
+        'branch' => $branchName,
+        'base_branch' => $baseBranch,
+        'commit' => [
+            'sha' => (string) ($commit['commit']['sha'] ?? ''),
+            'message' => $commitMessage,
+        ],
+        'pull_request' => [
+            'number' => (int) ($pullRequest['number'] ?? 0),
+            'title' => (string) ($pullRequest['title'] ?? $prTitle),
+            'url' => (string) ($pullRequest['html_url'] ?? ''),
+            'state' => (string) ($pullRequest['state'] ?? 'open'),
+        ],
+    ];
+}
+
+function github_create_person_media_pull_request(
+    string $owner,
+    string $repo,
+    string $action,
+    string $path,
+    ?string $binaryContent,
+    array $editor,
+    string $commitMessage,
+    string $prTitle,
+    string $prBody,
+): array {
+    $failures = [];
+    foreach (github_publish_token_candidates($editor) as $candidate) {
+        if (!github_token_can_publish($owner, $repo, $candidate['token'])) {
+            $failures[] = $candidate['source'] . ' lacks write access';
+            continue;
+        }
+
+        try {
+            return github_create_person_media_pull_request_with_token(
+                $candidate['token'],
+                $owner,
+                $repo,
+                $action,
+                $path,
+                $binaryContent,
+                $editor,
+                $commitMessage,
+                $prTitle,
+                $prBody,
+            );
+        } catch (RuntimeException $error) {
+            if (!github_is_publish_auth_failure($error)) {
+                throw $error;
+            }
+
+            $failures[] = $candidate['source'] . ': ' . $error->getMessage();
+        }
+    }
+
+    throw new RuntimeException(github_build_publish_token_help_message($failures));
+}
+
+function github_person_talk_path(string $personId): string
+{
+    return 'people/' . $personId . '/data/talk.json';
+}
+
+function github_fetch_person_talk(string $owner, string $repo, string $personId): array
+{
+    $base = github_get_repository_default_branch($owner, $repo, github_api_token());
+    $path = github_person_talk_path($personId);
+
+    $metadata = github_get_file_metadata_on_branch($owner, $repo, $path, $base['branch'], github_api_token());
+    if ($metadata === null) {
+        return [
+            'messages' => [],
+            'sha' => '',
+            'branch' => $base['branch'],
+        ];
+    }
+
+    $content = github_decode_content_payload($metadata);
+    $decoded = is_string($content) ? json_decode($content, true) : null;
+    $messages = is_array($decoded['messages'] ?? null) ? $decoded['messages'] : [];
+
+    return [
+        'messages' => array_values(array_filter($messages, 'is_array')),
+        'sha' => (string) ($metadata['sha'] ?? ''),
+        'branch' => $base['branch'],
+    ];
+}
+
+function github_normalize_talk_message(array $message): array
+{
+    return [
+        'id' => (string) ($message['id'] ?? ''),
+        'body' => (string) ($message['body'] ?? ''),
+        'author_login' => (string) ($message['author_login'] ?? ''),
+        'author_name' => (string) ($message['author_name'] ?? ''),
+        'author_avatar' => (string) ($message['author_avatar'] ?? ''),
+        'author_url' => (string) ($message['author_url'] ?? ''),
+        'created_at' => (string) ($message['created_at'] ?? ''),
+    ];
+}
+
+function github_save_person_talk(
+    string $owner,
+    string $repo,
+    string $personId,
+    array $messages,
+    string $existingSha,
+    array $editor,
+    string $commitMessage,
+): array {
+    $path = github_person_talk_path($personId);
+    $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
+    $commitIdentity = github_editor_commit_identity($user);
+    $content = json_encode(
+        ['messages' => array_values($messages)],
+        JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE,
+    );
+    if (!is_string($content)) {
+        throw new RuntimeException('Could not encode the talk page.');
+    }
+    $content .= "\n";
+
+    $failures = [];
+    foreach (github_publish_token_candidates($editor) as $candidate) {
+        if (!github_token_can_publish($owner, $repo, $candidate['token'])) {
+            $failures[] = $candidate['source'] . ' lacks write access';
+            continue;
+        }
+
+        $base = github_get_repository_default_branch($owner, $repo, $candidate['token']);
+        $sha = $existingSha;
+
+        for ($attempt = 0; $attempt < 3; $attempt += 1) {
+            try {
+                $commit = github_upsert_file_on_branch(
+                    $owner,
+                    $repo,
+                    $path,
+                    $base['branch'],
+                    $content,
+                    $commitMessage,
+                    $sha !== '' ? $sha : null,
+                    $candidate['token'],
+                    $commitIdentity,
+                );
+
+                return [
+                    'branch' => $base['branch'],
+                    'commit' => [
+                        'sha' => (string) ($commit['commit']['sha'] ?? ''),
+                        'message' => $commitMessage,
+                    ],
+                ];
+            } catch (RuntimeException $error) {
+                $message = $error->getMessage();
+                $isConflict = str_contains($message, 'HTTP 409')
+                    || str_contains($message, 'does not match')
+                    || str_contains($message, 'expected');
+
+                if ($isConflict && $attempt < 2) {
+                    $metadata = github_get_file_metadata_on_branch(
+                        $owner,
+                        $repo,
+                        $path,
+                        $base['branch'],
+                        $candidate['token'],
+                    );
+                    $sha = is_array($metadata) ? (string) ($metadata['sha'] ?? '') : '';
+                    continue;
+                }
+
+                if (!github_is_publish_auth_failure($error)) {
+                    throw $error;
+                }
+
+                $failures[] = $candidate['source'] . ': ' . $message;
+                break;
+            }
+        }
+    }
+
+    throw new RuntimeException(github_build_publish_token_help_message($failures));
+}
+
+// ---------------------------------------------------------------------------
+// Multi-file page edits (e.g. profile.html + profile-table.html in one PR)
+// ---------------------------------------------------------------------------
+
+function github_create_files_edit_pull_request_with_token(
+    string $token,
+    string $owner,
+    string $repo,
+    array $files,
+    array $editor,
+    string $commitMessage,
+    string $prTitle,
+    string $prBody,
+): array {
+    $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
+    $login = github_sanitize_branch_segment((string) ($user['login'] ?? 'editor'));
+    $commitIdentity = github_editor_commit_identity($user);
+
+    $base = github_get_repository_default_branch($owner, $repo, $token);
+    $baseBranch = $base['branch'];
+    $baseSha = $base['sha'];
+
+    $primaryPath = (string) ($files[0]['path'] ?? 'page');
+    $fileSlug = github_sanitize_branch_segment((string) pathinfo($primaryPath, PATHINFO_FILENAME));
+    $branchName = sprintf('edit/%s-%s-%s', $fileSlug, $login, gmdate('Ymd-His'));
+
+    github_create_branch_from_sha($owner, $repo, $branchName, $baseSha, $token);
+
+    $commits = [];
+    foreach ($files as $file) {
+        $path = (string) $file['path'];
+        $content = (string) $file['content'];
+
+        $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $branchName, $token);
+        if ($existingFile === null) {
+            $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $baseBranch, $token);
+        }
+        $existingSha = is_array($existingFile) ? (string) ($existingFile['sha'] ?? '') : '';
+
+        $commit = github_upsert_file_on_branch(
+            $owner,
+            $repo,
+            $path,
+            $branchName,
+            $content,
+            $commitMessage,
+            $existingSha !== '' ? $existingSha : null,
+            $token,
+            $commitIdentity,
+        );
+
+        $commits[] = [
+            'path' => $path,
+            'sha' => (string) ($commit['commit']['sha'] ?? ''),
+        ];
+    }
+
+    $pullRequest = github_create_pull_request(
+        $owner,
+        $repo,
+        $prTitle,
+        $branchName,
+        $baseBranch,
+        $prBody,
+        $token,
+    );
+
+    return [
+        'branch' => $branchName,
+        'base_branch' => $baseBranch,
+        'commit' => [
+            'sha' => (string) ($commits[count($commits) - 1]['sha'] ?? ''),
+            'message' => $commitMessage,
+        ],
+        'commits' => $commits,
+        'pull_request' => [
+            'number' => (int) ($pullRequest['number'] ?? 0),
+            'title' => (string) ($pullRequest['title'] ?? $prTitle),
+            'url' => (string) ($pullRequest['html_url'] ?? ''),
+            'state' => (string) ($pullRequest['state'] ?? 'open'),
+        ],
+    ];
+}
+
+function github_create_files_edit_pull_request(
+    string $owner,
+    string $repo,
+    array $files,
+    array $editor,
+    string $commitMessage,
+    string $prTitle,
+    string $prBody,
+): array {
+    $totalBytes = 0;
+    foreach ($files as $file) {
+        $totalBytes += strlen((string) ($file['content'] ?? ''));
+    }
+    if ($totalBytes > 4_000_000) {
+        throw new RuntimeException('The edited pages are too large to publish.');
+    }
+
+    $failures = [];
+    foreach (github_publish_token_candidates($editor) as $candidate) {
+        if (!github_token_can_publish($owner, $repo, $candidate['token'])) {
+            $failures[] = $candidate['source'] . ' lacks write access';
+            continue;
+        }
+
+        try {
+            return github_create_files_edit_pull_request_with_token(
+                $candidate['token'],
+                $owner,
+                $repo,
+                $files,
+                $editor,
+                $commitMessage,
+                $prTitle,
+                $prBody,
+            );
+        } catch (RuntimeException $error) {
+            if (!github_is_publish_auth_failure($error)) {
+                throw $error;
+            }
+
+            $failures[] = $candidate['source'] . ': ' . $error->getMessage();
+        }
+    }
+
+    throw new RuntimeException(github_build_publish_token_help_message($failures));
+}
