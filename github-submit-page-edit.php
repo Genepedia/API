@@ -34,6 +34,34 @@ $commitMessage = trim((string) ($payload['commit_message'] ?? ''));
 $prTitle = trim((string) ($payload['pr_title'] ?? ''));
 $prBody = trim((string) ($payload['pr_body'] ?? ''));
 
+function github_submit_page_edit_validate_path(string $path): ?string
+{
+    $normalized = str_replace('\\', '/', trim($path));
+    $normalized = ltrim($normalized, '/');
+
+    if ($normalized === '' || str_contains($normalized, '..')) {
+        return null;
+    }
+
+    if (preg_match('#^pages/[a-zA-Z0-9_./-]+\.html$#', $normalized)) {
+        return $normalized;
+    }
+
+    if (preg_match('#^people/[a-zA-Z0-9_-]+/profile\.html$#', $normalized)) {
+        return $normalized;
+    }
+
+    if (preg_match('#^people/[a-zA-Z0-9_-]+/data/[a-zA-Z0-9_.-]+\.html$#', $normalized)) {
+        return $normalized;
+    }
+
+    if (preg_match('#^people/[a-zA-Z0-9_-]+/data/family-tree\.ged$#', $normalized)) {
+        return $normalized;
+    }
+
+    return null;
+}
+
 // Normalise the request into a list of files. Clients send either the legacy
 // single {path, content} pair or a files array for multi-file edits (for
 // example a profile fragment together with its infobox include).
@@ -64,18 +92,19 @@ if ($rawFiles === [] || count($rawFiles) > 5) {
 
 $files = [];
 foreach ($rawFiles as $entry) {
-    $path = github_validate_repo_file_path($entry['path']);
+    $path = github_submit_page_edit_validate_path($entry['path']);
     $content = $entry['content'];
 
     $isPagePath = $path !== null && str_starts_with($path, 'pages/');
     $isPeoplePath = $path !== null
-        && preg_match('#^people/[a-zA-Z0-9_-]+/(profile\.html|data/[a-zA-Z0-9_.-]+\.html)$#', $path) === 1;
+        && preg_match('#^people/[a-zA-Z0-9_-]+/(profile\.html|data/[a-zA-Z0-9_.-]+\.html|data/family-tree\.ged)$#', $path) === 1;
+    $isGedcomPath = $path !== null && str_ends_with($path, '.ged');
 
     if ($path === null || (!$isPagePath && !$isPeoplePath)) {
         github_json([
             'ok' => false,
             'error' => 'invalid_path',
-            'message' => 'A valid pages/*.html or people/<id>/(data/)*.html repository path is required.',
+            'message' => 'A valid pages/*.html, people/<id>/(data/)*.html, or profile GEDCOM path is required.',
         ], 400);
     }
 
@@ -91,8 +120,8 @@ foreach ($rawFiles as $entry) {
         || str_contains(strtolower($content), '<!doctype');
 
     // Profile data files are HTML fragments; everything else must be a full document.
-    $isFragmentPath = $isPeoplePath && str_contains($path, '/data/');
-    if (!$isFragmentPath && !$looksLikeFullDocument) {
+    $isFragmentPath = $isPeoplePath && str_contains($path, '/data/') && !$isGedcomPath;
+    if (!$isFragmentPath && !$isGedcomPath && !$looksLikeFullDocument) {
         github_json([
             'ok' => false,
             'error' => 'invalid_content',
@@ -105,6 +134,14 @@ foreach ($rawFiles as $entry) {
             'ok' => false,
             'error' => 'invalid_content',
             'message' => 'Published content must contain HTML.',
+        ], 400);
+    }
+
+    if ($isGedcomPath && (!str_contains($content, '0 HEAD') || !str_contains($content, '0 TRLR'))) {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_content',
+            'message' => 'family-tree.ged must be a GEDCOM document.',
         ], 400);
     }
 
@@ -146,7 +183,7 @@ $allPaths = array_map(static fn (array $file): string => $file['path'], $files);
 if ($prBody === '') {
     $pathList = implode(', ', array_map(static fn (string $p): string => '`' . $p . '`', $allPaths));
     $prBody = implode("\n", [
-        'This pull request updates ' . $pathList . ' using the site page editor.',
+        'This update changes ' . $pathList . ' using the site page editor.',
         '',
         'Edited by ' . ($displayName !== '' ? $displayName : $login)
             . ($login !== '' ? ' (@' . $login . ')' : '') . '.',
@@ -161,6 +198,25 @@ if ($prBody === '') {
 }
 
 try {
+    $canPublishDirectly = github_user_can_direct_publish_paths($owner, $repo, $allPaths, $user);
+
+    if ($canPublishDirectly) {
+        $result = github_commit_files_to_default_branch($owner, $repo, $files, $editor, $commitMessage);
+
+        github_json([
+            'ok' => true,
+            'repo' => $repoSlug,
+            'path' => $path,
+            'paths' => $allPaths,
+            'branch' => $result['branch'],
+            'base_branch' => $result['branch'],
+            'commit' => $result['commit'],
+            'pull_request' => null,
+            'published_directly' => true,
+            'published_at' => gmdate('c'),
+        ]);
+    }
+
     if (count($files) > 1) {
         $result = github_create_files_edit_pull_request(
             $owner,
@@ -193,6 +249,7 @@ try {
         'base_branch' => $result['base_branch'],
         'commit' => $result['commit'],
         'pull_request' => $result['pull_request'],
+        'published_directly' => false,
         'published_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {

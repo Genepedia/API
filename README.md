@@ -12,7 +12,10 @@ Shared API between Genepedia projects.
 - `github-file-commits.php` — live file commit history for Genepedia pages (GitHub REST API proxy)
 - `github-file-commit-diff.php` — before/after file contents and unified diff for a single commit
 - `github-config.php` — reports whether OAuth and GitHub API authentication are configured
-- `github-submit-page-edit.php` — creates a branch, commit, and pull request for page editor changes (uses a GitHub App installation token or PAT with repository write access)
+- `github-submit-page-edit.php` — commits managed page/profile edits directly and opens pull requests for edits that need review (uses a GitHub App installation token or PAT with repository write access)
+- `github-self-profile.php` — directly commits new profiles and profile ownership without opening a pull request
+- `github-maintainers.php` — directly commits maintainer invitations, requests, and accepted maintainer access
+- `github-media.php` — directly commits managed profile media uploads/removals and reviews legacy pending media pull requests
 - `github-pull-requests.php` — lists open page-editor pull requests and returns file diffs for a selected PR
 - `github-pull-request-review.php` — approves (merge) or declines (close) a pull request; restricted to `GITHUB_REVIEW_LOGIN`
 - `github-contact.php` — creates a GitHub issue from the public contact form using the GitHub App installation token or PAT (no GitHub sign-in required)

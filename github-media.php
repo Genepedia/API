@@ -46,7 +46,7 @@ if ($method === 'GET') {
             'person' => $personId,
             'images' => github_list_person_media($owner, $repo, $personId),
             'pending' => $pending,
-            'can_manage' => github_person_can_manage($profileConfig, $user),
+            'can_manage' => github_profile_can_manage($owner, $repo, $personId, $user),
             'manager_logins' => github_person_profile_logins($profileConfig),
             'fetched_at' => gmdate('c'),
         ]);
@@ -127,11 +127,11 @@ if ($action === 'approve' || $action === 'decline') {
         ], 502);
     }
 
-    if (!github_person_can_manage($profileConfig, $editor['user'])) {
+    if (!github_profile_can_manage($owner, $repo, $personId, $editor['user'])) {
         github_json([
             'ok' => false,
             'error' => 'not_allowed',
-            'message' => 'Only the creator or maintainers of this profile can review its images.',
+            'message' => 'Only the creator, owner or maintainers of this profile can review its images.',
         ], 403);
     }
 
@@ -214,11 +214,11 @@ try {
     ], 502);
 }
 
-if (!github_person_can_manage($profileConfig, $user)) {
+if (!github_profile_can_manage($owner, $repo, $personId, $user)) {
     github_json([
         'ok' => false,
         'error' => 'not_allowed',
-        'message' => 'Only the creator or maintainers listed in this profile can manage its images.',
+        'message' => 'Only the creator, owner or maintainers of this profile can manage its images.',
     ], 403);
 }
 
@@ -264,7 +264,7 @@ if ($prTitle === '') {
 if ($prBody === '') {
     $lines = [
         sprintf(
-            'This pull request %s `%s` via the profile media tab.',
+            'This update %s `%s` via the profile media tab.',
             $action === 'upload' ? 'adds' : 'removes',
             $path,
         ),
@@ -284,7 +284,7 @@ if ($prBody === '') {
 }
 
 try {
-    $result = github_create_person_media_pull_request(
+    $result = github_commit_person_media_to_default_branch(
         $owner,
         $repo,
         $action,
@@ -302,10 +302,12 @@ try {
         'person' => $personId,
         'action' => $action,
         'path' => $path,
+        'filename' => $filename,
         'branch' => $result['branch'],
         'base_branch' => $result['base_branch'],
         'commit' => $result['commit'],
         'pull_request' => $result['pull_request'],
+        'published_directly' => true,
         'submitted_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {
