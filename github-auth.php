@@ -1301,6 +1301,11 @@ function github_people_db_repo_config(): array
 
 function github_people_db_workspace_root(): string
 {
+    return github_people_db_submodule_path() . '/people';
+}
+
+function github_people_db_submodule_path(): string
+{
     return 'data/Genepedia-Database';
 }
 
@@ -1322,16 +1327,26 @@ function github_people_db_workspace_path(string $path = ''): string
 function github_normalize_people_db_workspace_path(string $path): string
 {
     $normalized = ltrim(str_replace('\\', '/', trim($path)), '/');
-    if ($normalized === '' || $normalized === github_people_db_workspace_root()) {
+    $workspaceRoot = github_people_db_workspace_root();
+    $submoduleRoot = github_people_db_submodule_path();
+
+    if ($normalized === ''
+        || $normalized === $workspaceRoot
+        || $normalized === $submoduleRoot
+        || $normalized === github_people_db_legacy_workspace_root()) {
         return github_people_db_workspace_root();
     }
 
-    if (str_starts_with($normalized, github_people_db_workspace_root() . '/')) {
+    if (str_starts_with($normalized, $workspaceRoot . '/')) {
         return $normalized;
     }
 
+    if (str_starts_with($normalized, $submoduleRoot . '/')) {
+        return $workspaceRoot . '/' . substr($normalized, strlen($submoduleRoot) + 1);
+    }
+
     if (str_starts_with($normalized, github_people_db_legacy_workspace_root() . '/')) {
-        return github_people_db_workspace_root() . substr($normalized, strlen(github_people_db_legacy_workspace_root()));
+        return $workspaceRoot . substr($normalized, strlen(github_people_db_legacy_workspace_root()));
     }
 
     if (preg_match('#^(manifest\.json|(persons|unions|ownership|graph|index|sources|export|reports)/)#', $normalized) === 1) {
@@ -1351,13 +1366,14 @@ function github_is_people_db_workspace_path(string $path): bool
 function github_people_db_repo_path(string $path): string
 {
     $normalized = github_normalize_people_db_workspace_path($path);
+    $submoduleRoot = github_people_db_submodule_path();
     $root = github_people_db_workspace_root();
     if ($normalized === $root) {
-        return '';
+        return 'people';
     }
 
-    if (str_starts_with($normalized, $root . '/')) {
-        return substr($normalized, strlen($root) + 1);
+    if (str_starts_with($normalized, $submoduleRoot . '/')) {
+        return substr($normalized, strlen($submoduleRoot) + 1);
     }
 
     return ltrim($normalized, '/');
@@ -2881,7 +2897,7 @@ function github_normalize_pull_request_user(?array $user): array
 
 function github_extract_page_path_from_pull_request_body(array $pullRequest): string
 {
-    if (preg_match('/`((?:pages|people|data\/(?:Genepedia-Database|people\/v1))\/[^`]+)`/', (string) ($pullRequest['body'] ?? ''), $matches) === 1) {
+    if (preg_match('/`((?:pages|people|data\/(?:Genepedia-Database(?:\/people)?|people\/v1))\/[^`]+)`/', (string) ($pullRequest['body'] ?? ''), $matches) === 1) {
         return github_is_people_db_workspace_path($matches[1])
             ? github_normalize_people_db_workspace_path($matches[1])
             : $matches[1];
@@ -3237,17 +3253,17 @@ function github_validate_repo_history_path(string $path): ?string
     }
 
     $dbPath = github_normalize_people_db_workspace_path($normalized);
-    if (preg_match('#^data/Genepedia-Database/(persons|unions|ownership|graph)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $dbPath) === 1) {
+    if (preg_match('#^data/Genepedia-Database/people/(persons|unions|ownership|graph)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $dbPath) === 1) {
         return $dbPath;
     }
-    if (preg_match('#^data/Genepedia-Database/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $dbPath) === 1) {
+    if (preg_match('#^data/Genepedia-Database/people/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $dbPath) === 1) {
         return $dbPath;
     }
     if (in_array($dbPath, [
-        'data/Genepedia-Database/index/all-ids.json',
-        'data/Genepedia-Database/index/ownership-logins.json',
-        'data/Genepedia-Database/manifest.json',
-        'data/Genepedia-Database/sources/gedcom-id-map.json',
+        'data/Genepedia-Database/people/index/all-ids.json',
+        'data/Genepedia-Database/people/index/ownership-logins.json',
+        'data/Genepedia-Database/people/manifest.json',
+        'data/Genepedia-Database/people/sources/gedcom-id-map.json',
     ], true)) {
         return $dbPath;
     }
@@ -3523,7 +3539,7 @@ function github_profile_edit_person_id(array $paths): ?string
     foreach ($paths as $path) {
         $matches = null;
         if (preg_match('#^people/([a-zA-Z0-9_-]+)/(?:index\.html|profile\.html|data/[a-zA-Z0-9_.-]+\.html|data/family-tree\.ged)$#', (string) $path, $matches) !== 1
-            && preg_match('#^data/(?:Genepedia-Database|people/v1)/(?:ownership|persons)/[a-zA-Z0-9_-]+/([a-zA-Z0-9_-]+)\.json$#', (string) $path, $matches) !== 1) {
+            && preg_match('#^data/(?:Genepedia-Database(?:/people)?|people/v1)/(?:ownership|persons)/[a-zA-Z0-9_-]+/([a-zA-Z0-9_-]+)\.json$#', (string) $path, $matches) !== 1) {
             return null;
         }
 

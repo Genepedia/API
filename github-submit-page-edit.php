@@ -58,17 +58,17 @@ function github_submit_page_edit_validate_path(string $path): ?string
 
     // Canonical JSON database records and derived indexes.
     $dbPath = github_normalize_people_db_workspace_path($normalized);
-    if (preg_match('#^data/Genepedia-Database/(persons|unions|ownership|graph)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $dbPath)) {
+    if (preg_match('#^data/Genepedia-Database/people/(persons|unions|ownership|graph)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $dbPath)) {
         return $dbPath;
     }
-    if (preg_match('#^data/Genepedia-Database/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $dbPath)) {
+    if (preg_match('#^data/Genepedia-Database/people/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $dbPath)) {
         return $dbPath;
     }
     if (in_array($dbPath, [
-        'data/Genepedia-Database/index/all-ids.json',
-        'data/Genepedia-Database/index/ownership-logins.json',
-        'data/Genepedia-Database/manifest.json',
-        'data/Genepedia-Database/sources/gedcom-id-map.json',
+        'data/Genepedia-Database/people/index/all-ids.json',
+        'data/Genepedia-Database/people/index/ownership-logins.json',
+        'data/Genepedia-Database/people/manifest.json',
+        'data/Genepedia-Database/people/sources/gedcom-id-map.json',
     ], true)) {
         return $dbPath;
     }
@@ -118,7 +118,7 @@ foreach ($rawFiles as $entry) {
     $isPeopleShell = $path !== null && preg_match('#^people/[a-zA-Z0-9_-]+/index\.html$#', $path) === 1;
     $isPeopleFragment = $path !== null && preg_match('#^people/[a-zA-Z0-9_-]+/(?:profile|[a-zA-Z0-9_.-]+)\.html$#', $path) === 1 && !$isPeopleShell;
     $isDbJson = $path !== null && (
-        preg_match('#^data/Genepedia-Database/.+\.json$#', $path) === 1
+        preg_match('#^data/Genepedia-Database/people/.+\.json$#', $path) === 1
         || $path === 'people/people.json'
     );
     $isSitemap = $path === 'sitemap.xml';
@@ -127,7 +127,7 @@ foreach ($rawFiles as $entry) {
         github_json([
             'ok' => false,
             'error' => 'invalid_path',
-            'message' => 'A valid pages/*.html, people/<id>/index.html, people/<id>/*.html, or data/Genepedia-Database/**.json path is required.',
+            'message' => 'A valid pages/*.html, people/<id>/index.html, people/<id>/*.html, or data/Genepedia-Database/people/**.json path is required.',
         ], 400);
     }
 
