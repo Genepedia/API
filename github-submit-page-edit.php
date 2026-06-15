@@ -43,19 +43,38 @@ function github_submit_page_edit_validate_path(string $path): ?string
         return null;
     }
 
+    // Editable site pages.
     if (preg_match('#^pages/[a-zA-Z0-9_./-]+\.html$#', $normalized)) {
         return $normalized;
     }
 
-    if (preg_match('#^people/[a-zA-Z0-9_-]+/profile\.html$#', $normalized)) {
+    // Per-person SEO shell + editable narrative prose.
+    if (preg_match('#^people/[a-zA-Z0-9_-]+/index\.html$#', $normalized)) {
+        return $normalized;
+    }
+    if (preg_match('#^people/[a-zA-Z0-9_-]+/(?:profile|[a-zA-Z0-9_.-]+)\.html$#', $normalized)) {
         return $normalized;
     }
 
-    if (preg_match('#^people/[a-zA-Z0-9_-]+/data/[a-zA-Z0-9_.-]+\.html$#', $normalized)) {
-        return $normalized;
+    // Canonical JSON database records and derived indexes.
+    $dbPath = github_normalize_people_db_workspace_path($normalized);
+    if (preg_match('#^data/Genepedia-Database/(persons|unions|ownership|graph)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $dbPath)) {
+        return $dbPath;
+    }
+    if (preg_match('#^data/Genepedia-Database/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $dbPath)) {
+        return $dbPath;
+    }
+    if (in_array($dbPath, [
+        'data/Genepedia-Database/index/all-ids.json',
+        'data/Genepedia-Database/index/ownership-logins.json',
+        'data/Genepedia-Database/manifest.json',
+        'data/Genepedia-Database/sources/gedcom-id-map.json',
+    ], true)) {
+        return $dbPath;
     }
 
-    if (preg_match('#^people/[a-zA-Z0-9_-]+/data/family-tree\.ged$#', $normalized)) {
+    // Compatibility registry + sitemap.
+    if ($normalized === 'people/people.json' || $normalized === 'sitemap.xml') {
         return $normalized;
     }
 
@@ -96,15 +115,19 @@ foreach ($rawFiles as $entry) {
     $content = $entry['content'];
 
     $isPagePath = $path !== null && str_starts_with($path, 'pages/');
-    $isPeoplePath = $path !== null
-        && preg_match('#^people/[a-zA-Z0-9_-]+/(profile\.html|data/[a-zA-Z0-9_.-]+\.html|data/family-tree\.ged)$#', $path) === 1;
-    $isGedcomPath = $path !== null && str_ends_with($path, '.ged');
+    $isPeopleShell = $path !== null && preg_match('#^people/[a-zA-Z0-9_-]+/index\.html$#', $path) === 1;
+    $isPeopleFragment = $path !== null && preg_match('#^people/[a-zA-Z0-9_-]+/(?:profile|[a-zA-Z0-9_.-]+)\.html$#', $path) === 1 && !$isPeopleShell;
+    $isDbJson = $path !== null && (
+        preg_match('#^data/Genepedia-Database/.+\.json$#', $path) === 1
+        || $path === 'people/people.json'
+    );
+    $isSitemap = $path === 'sitemap.xml';
 
-    if ($path === null || (!$isPagePath && !$isPeoplePath)) {
+    if ($path === null) {
         github_json([
             'ok' => false,
             'error' => 'invalid_path',
-            'message' => 'A valid pages/*.html, people/<id>/(data/)*.html, or profile GEDCOM path is required.',
+            'message' => 'A valid pages/*.html, people/<id>/index.html, people/<id>/*.html, or data/Genepedia-Database/**.json path is required.',
         ], 400);
     }
 
@@ -112,36 +135,46 @@ foreach ($rawFiles as $entry) {
         github_json([
             'ok' => false,
             'error' => 'invalid_content',
-            'message' => 'Page content is required for ' . $path . '.',
+            'message' => 'Content is required for ' . $path . '.',
         ], 400);
     }
 
     $looksLikeFullDocument = str_contains(strtolower($content), '<html')
         || str_contains(strtolower($content), '<!doctype');
 
-    // Profile data files are HTML fragments; everything else must be a full document.
-    $isFragmentPath = $isPeoplePath && str_contains($path, '/data/') && !$isGedcomPath;
-    if (!$isFragmentPath && !$isGedcomPath && !$looksLikeFullDocument) {
+    // Full HTML documents are required for site pages and per-person shells.
+    if (($isPagePath || $isPeopleShell) && !$looksLikeFullDocument) {
         github_json([
             'ok' => false,
             'error' => 'invalid_content',
-            'message' => 'Published content must be a complete HTML document.',
+            'message' => 'Published page content must be a complete HTML document.',
         ], 400);
     }
 
-    if ($isFragmentPath && !str_contains($content, '<')) {
+    // Prose fragments must contain HTML.
+    if ($isPeopleFragment && !str_contains($content, '<')) {
         github_json([
             'ok' => false,
             'error' => 'invalid_content',
-            'message' => 'Published content must contain HTML.',
+            'message' => 'Profile prose must contain HTML.',
         ], 400);
     }
 
-    if ($isGedcomPath && (!str_contains($content, '0 HEAD') || !str_contains($content, '0 TRLR'))) {
+    // Database records must be valid JSON.
+    if ($isDbJson && json_decode($content) === null && strtolower(trim($content)) !== 'null') {
         github_json([
             'ok' => false,
             'error' => 'invalid_content',
-            'message' => 'family-tree.ged must be a GEDCOM document.',
+            'message' => $path . ' must be valid JSON.',
+        ], 400);
+    }
+
+    // Sitemap must be an XML urlset.
+    if ($isSitemap && !str_contains($content, '<urlset')) {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_content',
+            'message' => 'sitemap.xml must be a sitemap urlset document.',
         ], 400);
     }
 
@@ -161,10 +194,6 @@ try {
     ], 401);
 }
 
-$repoConfig = github_repo_config();
-$owner = $repoConfig['owner'];
-$repo = $repoConfig['repo'];
-$repoSlug = $owner . '/' . $repo;
 $user = $editor['user'];
 $login = trim((string) ($user['login'] ?? 'editor'));
 $displayName = trim((string) ($user['displayName'] ?? $login));
@@ -198,58 +227,20 @@ if ($prBody === '') {
 }
 
 try {
-    $canPublishDirectly = github_user_can_direct_publish_paths($owner, $repo, $allPaths, $user);
-
-    if ($canPublishDirectly) {
-        $result = github_commit_files_to_default_branch($owner, $repo, $files, $editor, $commitMessage);
-
-        github_json([
-            'ok' => true,
-            'repo' => $repoSlug,
-            'path' => $path,
-            'paths' => $allPaths,
-            'branch' => $result['branch'],
-            'base_branch' => $result['branch'],
-            'commit' => $result['commit'],
-            'pull_request' => null,
-            'published_directly' => true,
-            'published_at' => gmdate('c'),
-        ]);
-    }
-
-    if (count($files) > 1) {
-        $result = github_create_files_edit_pull_request(
-            $owner,
-            $repo,
-            $files,
-            $editor,
-            $commitMessage,
-            $prTitle,
-            $prBody,
-        );
-    } else {
-        $result = github_create_page_edit_pull_request(
-            $owner,
-            $repo,
-            $path,
-            $content,
-            $editor,
-            $commitMessage,
-            $prTitle,
-            $prBody,
-        );
-    }
+    $result = github_publish_workspace_files($files, $editor, $commitMessage, $prTitle, $prBody);
 
     github_json([
         'ok' => true,
-        'repo' => $repoSlug,
-        'path' => $path,
-        'paths' => $allPaths,
+        'repo' => $result['repo'],
+        'path' => $result['path'] !== '' ? $result['path'] : $path,
+        'paths' => $result['paths'] ?: $allPaths,
         'branch' => $result['branch'],
         'base_branch' => $result['base_branch'],
         'commit' => $result['commit'],
         'pull_request' => $result['pull_request'],
-        'published_directly' => false,
+        'published_directly' => (bool) $result['published_directly'],
+        'results' => $result['results'],
+        'secondary_results' => $result['secondary_results'],
         'published_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {

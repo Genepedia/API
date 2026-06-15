@@ -45,7 +45,7 @@ function github_maintainers_profile_person_id(array $paths): ?string
 {
     $personId = null;
     foreach ($paths as $path) {
-        if (preg_match('#^people/([a-zA-Z0-9_-]+)/(?:profile\.html|data/|media/)#', (string) $path, $matches) !== 1) {
+        if (preg_match('#^people/([a-zA-Z0-9_-]+)/(?:index\.html|profile\.html|data/|media/)#', (string) $path, $matches) !== 1) {
             return null;
         }
 
@@ -69,7 +69,7 @@ function github_maintainers_target_from_paths(array $paths): ?array
             'key' => 'profile:' . $personId,
             'person_id' => $personId,
             'editable_path' => 'people/' . $personId . '/profile.html',
-            'metadata_path' => 'people/' . $personId . '/profile.json',
+            'metadata_path' => github_person_ownership_path($personId),
             'label' => 'Profile ' . $personId,
         ];
     }
@@ -471,17 +471,20 @@ if ($action === 'request') {
 }
 
 try {
-    $result = github_commit_files_to_default_branch($owner, $repo, $files, $editor, $commitMessage);
+    $result = github_publish_workspace_files($files, $editor, $commitMessage, $commitMessage, '');
     $freshCanManage = github_maintainers_user_can_manage($owner, $repo, $target, $user);
     $freshIsMaintainer = github_maintainers_is_maintainer($targetConfig, $user) || $freshCanManage;
     github_json([
         'ok' => true,
-        'repo' => $repoSlug,
+        'repo' => $result['repo'],
         'target' => $target,
         'items' => github_maintainers_target_items($ledger, $target),
         'can_manage' => $freshCanManage,
         'is_maintainer' => $freshIsMaintainer,
         'commit' => $result['commit'],
+        'pull_request' => $result['pull_request'],
+        'published_directly' => (bool) $result['published_directly'],
+        'results' => $result['results'],
         'published_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {

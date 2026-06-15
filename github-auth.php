@@ -1249,6 +1249,185 @@ function github_repo_config(): array
     ];
 }
 
+function github_media_repo_config(): array
+{
+    $siteRepo = github_repo_config();
+    $configured = trim((string) (getenv('GITHUB_MEDIA_REPO') ?: ''));
+    if ($configured === '') {
+        return [
+            'owner' => $siteRepo['owner'],
+            'repo' => 'Genepedia-Media',
+        ];
+    }
+
+    $parts = array_values(array_filter(explode('/', $configured), static fn ($part) => $part !== ''));
+    if (count($parts) === 1) {
+        return [
+            'owner' => $siteRepo['owner'],
+            'repo' => (string) $parts[0],
+        ];
+    }
+
+    return [
+        'owner' => (string) ($parts[0] ?? $siteRepo['owner']),
+        'repo' => (string) ($parts[1] ?? 'Genepedia-Media'),
+    ];
+}
+
+function github_people_db_repo_config(): array
+{
+    $siteRepo = github_repo_config();
+    $configured = trim((string) (getenv('GITHUB_PEOPLE_DB_REPO') ?: ''));
+    if ($configured === '') {
+        return [
+            'owner' => $siteRepo['owner'],
+            'repo' => 'Genepedia-Database',
+        ];
+    }
+
+    $parts = array_values(array_filter(explode('/', $configured), static fn ($part) => $part !== ''));
+    if (count($parts) === 1) {
+        return [
+            'owner' => $siteRepo['owner'],
+            'repo' => (string) $parts[0],
+        ];
+    }
+
+    return [
+        'owner' => (string) ($parts[0] ?? $siteRepo['owner']),
+        'repo' => (string) ($parts[1] ?? 'Genepedia-Database'),
+    ];
+}
+
+function github_people_db_workspace_root(): string
+{
+    return 'data/Genepedia-Database';
+}
+
+function github_people_db_legacy_workspace_root(): string
+{
+    return 'data/people/v1';
+}
+
+function github_people_db_workspace_path(string $path = ''): string
+{
+    $clean = ltrim(str_replace('\\', '/', trim($path)), '/');
+    if ($clean === '') {
+        return github_people_db_workspace_root();
+    }
+
+    return github_people_db_workspace_root() . '/' . $clean;
+}
+
+function github_normalize_people_db_workspace_path(string $path): string
+{
+    $normalized = ltrim(str_replace('\\', '/', trim($path)), '/');
+    if ($normalized === '' || $normalized === github_people_db_workspace_root()) {
+        return github_people_db_workspace_root();
+    }
+
+    if (str_starts_with($normalized, github_people_db_workspace_root() . '/')) {
+        return $normalized;
+    }
+
+    if (str_starts_with($normalized, github_people_db_legacy_workspace_root() . '/')) {
+        return github_people_db_workspace_root() . substr($normalized, strlen(github_people_db_legacy_workspace_root()));
+    }
+
+    if (preg_match('#^(manifest\.json|(persons|unions|ownership|graph|index|sources|export|reports)/)#', $normalized) === 1) {
+        return github_people_db_workspace_path($normalized);
+    }
+
+    return $normalized;
+}
+
+function github_is_people_db_workspace_path(string $path): bool
+{
+    $normalized = github_normalize_people_db_workspace_path($path);
+    return $normalized === github_people_db_workspace_root()
+        || str_starts_with($normalized, github_people_db_workspace_root() . '/');
+}
+
+function github_people_db_repo_path(string $path): string
+{
+    $normalized = github_normalize_people_db_workspace_path($path);
+    $root = github_people_db_workspace_root();
+    if ($normalized === $root) {
+        return '';
+    }
+
+    if (str_starts_with($normalized, $root . '/')) {
+        return substr($normalized, strlen($root) + 1);
+    }
+
+    return ltrim($normalized, '/');
+}
+
+function github_repository_context_for_workspace_path(string $path): array
+{
+    $normalized = ltrim(str_replace('\\', '/', trim($path)), '/');
+    if (github_is_people_db_workspace_path($normalized)) {
+        $repoConfig = github_people_db_repo_config();
+        $workspacePath = github_normalize_people_db_workspace_path($normalized);
+        return [
+            'kind' => 'people_db',
+            'owner' => $repoConfig['owner'],
+            'repo' => $repoConfig['repo'],
+            'repo_slug' => $repoConfig['owner'] . '/' . $repoConfig['repo'],
+            'workspace_path' => $workspacePath,
+            'repo_path' => github_people_db_repo_path($workspacePath),
+        ];
+    }
+
+    $repoConfig = github_repo_config();
+    return [
+        'kind' => 'site',
+        'owner' => $repoConfig['owner'],
+        'repo' => $repoConfig['repo'],
+        'repo_slug' => $repoConfig['owner'] . '/' . $repoConfig['repo'],
+        'workspace_path' => $normalized,
+        'repo_path' => $normalized,
+    ];
+}
+
+function github_repository_context_for_paths(array $paths): ?array
+{
+    $context = null;
+    $repoPaths = [];
+    $workspacePaths = [];
+
+    foreach ($paths as $path) {
+        $pathContext = github_repository_context_for_workspace_path((string) $path);
+        if ($context === null) {
+            $context = $pathContext;
+        } elseif ($context['repo_slug'] !== $pathContext['repo_slug']) {
+            return null;
+        }
+
+        $repoPaths[] = $pathContext['repo_path'];
+        $workspacePaths[] = $pathContext['workspace_path'];
+    }
+
+    if ($context === null) {
+        return null;
+    }
+
+    $context['repo_paths'] = $repoPaths;
+    $context['workspace_paths'] = $workspacePaths;
+    return $context;
+}
+
+function github_person_media_directory(string $personId): string
+{
+    return 'people/' . $personId;
+}
+
+function github_person_media_file_path(string $personId, string $filename): string
+{
+    $cleanFile = ltrim(str_replace('\\', '/', trim($filename)), '/');
+    return github_person_media_directory($personId) . '/' . $cleanFile;
+}
+
 function github_validate_repo_file_path(string $path): ?string
 {
     $normalized = str_replace('\\', '/', trim($path));
@@ -2122,7 +2301,12 @@ function github_rest_request_json(string $method, string $url, ?string $token, ?
     return $data;
 }
 
-function github_get_repository_default_branch(string $owner, string $repo, string $token): array
+function github_is_empty_repository_error(Throwable $error): bool
+{
+    return str_contains($error->getMessage(), 'Git Repository is empty');
+}
+
+function github_repository_default_branch_name(string $owner, string $repo, string $token): string
 {
     $repository = github_rest_request_json(
         'GET',
@@ -2133,9 +2317,12 @@ function github_get_repository_default_branch(string $owner, string $repo, strin
     );
 
     $defaultBranch = trim((string) ($repository['default_branch'] ?? 'main'));
-    if ($defaultBranch === '') {
-        $defaultBranch = 'main';
-    }
+    return $defaultBranch !== '' ? $defaultBranch : 'main';
+}
+
+function github_get_repository_default_branch(string $owner, string $repo, string $token): array
+{
+    $defaultBranch = github_repository_default_branch_name($owner, $repo, $token);
 
     $reference = github_rest_request_json(
         'GET',
@@ -2249,6 +2436,98 @@ function github_upsert_file_on_branch(
         $payload,
         'Update file',
     );
+}
+
+function github_create_initial_file_on_default_branch(
+    string $owner,
+    string $repo,
+    string $path,
+    string $content,
+    string $commitMessage,
+    string $token,
+    ?array $commitIdentity = null,
+): array {
+    $defaultBranch = github_repository_default_branch_name($owner, $repo, $token);
+
+    $blob = github_rest_request_json(
+        'POST',
+        sprintf('https://api.github.com/repos/%s/%s/git/blobs', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        [
+            'content' => base64_encode($content),
+            'encoding' => 'base64',
+        ],
+        'Create blob',
+    );
+
+    $blobSha = trim((string) ($blob['sha'] ?? ''));
+    if ($blobSha === '') {
+        throw new RuntimeException('GitHub did not return a blob SHA for the first media upload.');
+    }
+
+    $tree = github_rest_request_json(
+        'POST',
+        sprintf('https://api.github.com/repos/%s/%s/git/trees', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        [
+            'tree' => [[
+                'path' => $path,
+                'mode' => '100644',
+                'type' => 'blob',
+                'sha' => $blobSha,
+            ]],
+        ],
+        'Create initial tree',
+    );
+
+    $treeSha = trim((string) ($tree['sha'] ?? ''));
+    if ($treeSha === '') {
+        throw new RuntimeException('GitHub did not return a tree SHA for the first media upload.');
+    }
+
+    $commitPayload = [
+        'message' => $commitMessage,
+        'tree' => $treeSha,
+        'parents' => [],
+    ];
+    if (is_array($commitIdentity)) {
+        $commitPayload['author'] = $commitIdentity;
+        $commitPayload['committer'] = $commitIdentity;
+    }
+
+    $commit = github_rest_request_json(
+        'POST',
+        sprintf('https://api.github.com/repos/%s/%s/git/commits', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        $commitPayload,
+        'Create initial commit',
+    );
+
+    $commitSha = trim((string) ($commit['sha'] ?? ''));
+    if ($commitSha === '') {
+        throw new RuntimeException('GitHub did not return a commit SHA for the first media upload.');
+    }
+
+    github_rest_request_json(
+        'POST',
+        sprintf('https://api.github.com/repos/%s/%s/git/refs', rawurlencode($owner), rawurlencode($repo)),
+        $token,
+        [
+            'ref' => 'refs/heads/' . $defaultBranch,
+            'sha' => $commitSha,
+        ],
+        'Create default branch',
+    );
+
+    return [
+        'branch' => $defaultBranch,
+        'base_branch' => $defaultBranch,
+        'commit' => [
+            'sha' => $commitSha,
+            'message' => $commitMessage,
+        ],
+        'pull_request' => null,
+    ];
 }
 
 function github_commit_files_to_default_branch_with_token(
@@ -2602,8 +2881,10 @@ function github_normalize_pull_request_user(?array $user): array
 
 function github_extract_page_path_from_pull_request_body(array $pullRequest): string
 {
-    if (preg_match('/`((?:pages|people)\/[^`]+)`/', (string) ($pullRequest['body'] ?? ''), $matches) === 1) {
-        return $matches[1];
+    if (preg_match('/`((?:pages|people|data\/(?:Genepedia-Database|people\/v1))\/[^`]+)`/', (string) ($pullRequest['body'] ?? ''), $matches) === 1) {
+        return github_is_people_db_workspace_path($matches[1])
+            ? github_normalize_people_db_workspace_path($matches[1])
+            : $matches[1];
     }
 
     return '';
@@ -2922,7 +3203,7 @@ function github_review_pull_request(string $owner, string $repo, int $number, st
 // ---------------------------------------------------------------------------
 
 const GITHUB_MEDIA_MAX_BYTES = 8_000_000;
-const GITHUB_MEDIA_ALLOWED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg'];
+const GITHUB_MEDIA_ALLOWED_EXTENSIONS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'svg', 'pdf'];
 const GITHUB_TALK_MAX_MESSAGE_LENGTH = 5000;
 const GITHUB_TALK_MAX_MESSAGES = 2000;
 
@@ -2938,8 +3219,9 @@ function github_validate_person_id(string $personId): ?string
 
 /**
  * Path validation for read-only history/diff lookups. Accepts the page-editor
- * .html paths plus profile data files (talk.json, *.ged) and the per-person
- * data/images directory so media commits show up on the Changes tab.
+ * .html paths, canonical people database JSON paths, plus profile data files
+ * (talk.json, *.ged) and the per-person media folder/file paths so commits show
+ * up on the Changes tab.
  */
 function github_validate_repo_history_path(string $path): ?string
 {
@@ -2954,7 +3236,23 @@ function github_validate_repo_history_path(string $path): ?string
         return $normalized;
     }
 
-    if (preg_match('#^people/[a-zA-Z0-9_-]+/data/images$#', $normalized)) {
+    $dbPath = github_normalize_people_db_workspace_path($normalized);
+    if (preg_match('#^data/Genepedia-Database/(persons|unions|ownership|graph)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $dbPath) === 1) {
+        return $dbPath;
+    }
+    if (preg_match('#^data/Genepedia-Database/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $dbPath) === 1) {
+        return $dbPath;
+    }
+    if (in_array($dbPath, [
+        'data/Genepedia-Database/index/all-ids.json',
+        'data/Genepedia-Database/index/ownership-logins.json',
+        'data/Genepedia-Database/manifest.json',
+        'data/Genepedia-Database/sources/gedcom-id-map.json',
+    ], true)) {
+        return $dbPath;
+    }
+
+    if (preg_match('#^people/[a-zA-Z0-9_-]+(?:/images|/[a-zA-Z0-9._-]+\.(?:jpe?g|png|gif|webp|svg|avif|pdf))?$#i', $normalized)) {
         return $normalized;
     }
 
@@ -2990,11 +3288,29 @@ function github_parse_repo_history_paths_request(): ?array
     return $validated !== null ? [$validated] : null;
 }
 
+function github_person_db_bucket(string $personId): int
+{
+    $digits = preg_replace('/[^0-9]/', '', $personId);
+    $n = $digits === '' ? 0 : (int) $digits;
+    return (int) floor((max(1, $n) - 1) / 1000);
+}
+
+function github_person_ownership_path(string $personId): string
+{
+    return github_people_db_workspace_path('ownership/' . github_person_db_bucket($personId) . '/' . $personId . '.json');
+}
+
+function github_person_record_path(string $personId): string
+{
+    return github_people_db_workspace_path('persons/' . github_person_db_bucket($personId) . '/' . $personId . '.json');
+}
+
 function github_fetch_person_profile_config(string $owner, string $repo, string $personId): array
 {
-    $path = 'people/' . $personId . '/profile.json';
-    $base = github_get_repository_default_branch($owner, $repo, github_api_token());
-    $content = github_fetch_file_contents_at_ref($owner, $repo, $path, $base['branch']);
+    $dbRepo = github_people_db_repo_config();
+    $path = github_people_db_repo_path(github_person_ownership_path($personId));
+    $base = github_get_repository_default_branch($dbRepo['owner'], $dbRepo['repo'], github_api_token());
+    $content = github_fetch_file_contents_at_ref($dbRepo['owner'], $dbRepo['repo'], $path, $base['branch']);
     if ($content === null) {
         return [];
     }
@@ -3205,7 +3521,9 @@ function github_profile_edit_person_id(array $paths): ?string
 {
     $personId = null;
     foreach ($paths as $path) {
-        if (preg_match('#^people/([a-zA-Z0-9_-]+)/(?:profile\.html|data/[a-zA-Z0-9_.-]+\.html|data/family-tree\.ged)$#', (string) $path, $matches) !== 1) {
+        $matches = null;
+        if (preg_match('#^people/([a-zA-Z0-9_-]+)/(?:index\.html|profile\.html|data/[a-zA-Z0-9_.-]+\.html|data/family-tree\.ged)$#', (string) $path, $matches) !== 1
+            && preg_match('#^data/(?:Genepedia-Database|people/v1)/(?:ownership|persons)/[a-zA-Z0-9_-]+/([a-zA-Z0-9_-]+)\.json$#', (string) $path, $matches) !== 1) {
             return null;
         }
 
@@ -3251,7 +3569,7 @@ function github_profile_can_manage(
     }
 
     try {
-        return github_repo_path_was_created_by_user($owner, $repo, 'people/' . $personId . '/profile.html', $user);
+        return github_repo_path_was_created_by_user($owner, $repo, 'people/' . $personId . '/index.html', $user);
     } catch (Throwable $error) {
         return false;
     }
@@ -3309,14 +3627,97 @@ function github_validate_media_filename(string $filename): ?string
     return $filename;
 }
 
+function github_fetch_remote_media(string $url): array
+{
+    $url = trim($url);
+    if ($url === '' || !filter_var($url, FILTER_VALIDATE_URL)) {
+        throw new RuntimeException('A valid remote media link is required.');
+    }
+
+    $parts = parse_url($url);
+    $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+    if (!in_array($scheme, ['http', 'https'], true)) {
+        throw new RuntimeException('Only http(s) remote media links are supported.');
+    }
+
+    $host = strtolower((string) ($parts['host'] ?? ''));
+    if ($host === '' || !($host === 'geni.com' || str_ends_with($host, '.geni.com'))) {
+        throw new RuntimeException('Only Geni media links can be uploaded remotely.');
+    }
+
+    if (!function_exists('curl_init')) {
+        throw new RuntimeException('PHP cURL is required to fetch remote media links.');
+    }
+
+    $ch = curl_init($url);
+    if ($ch === false) {
+        throw new RuntimeException('Failed to initialize the remote media download.');
+    }
+
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 5,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_TIMEOUT => 45,
+        CURLOPT_USERAGENT => 'Genepedia-Media-Importer',
+        CURLOPT_HTTPHEADER => [
+            'Accept: image/*,application/pdf;q=0.9,*/*;q=0.1',
+        ],
+    ]);
+
+    $body = curl_exec($ch);
+    if ($body === false) {
+        $message = curl_error($ch) ?: 'Unknown cURL error.';
+        curl_close($ch);
+        throw new RuntimeException('Could not download the remote media file: ' . $message);
+    }
+
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $contentType = strtolower(trim((string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE)));
+    $effectiveUrl = (string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    curl_close($ch);
+
+    if ($status < 200 || $status >= 300) {
+        throw new RuntimeException('Could not download the remote media file (HTTP ' . $status . ').');
+    }
+
+    if ($contentType !== ''
+        && !preg_match('#^(image/|application/pdf(?:;|$)|application/octet-stream(?:;|$))#i', $contentType)) {
+        throw new RuntimeException('Remote URL did not return an image or PDF file.');
+    }
+
+    if (!is_string($body) || $body === '') {
+        throw new RuntimeException('The remote media file was empty.');
+    }
+
+    if (strlen($body) > GITHUB_MEDIA_MAX_BYTES) {
+        throw new RuntimeException('Media files must be smaller than ' . round(GITHUB_MEDIA_MAX_BYTES / 1_000_000) . ' MB.');
+    }
+
+    return [
+        'content' => $body,
+        'content_type' => $contentType,
+        'url' => $effectiveUrl !== '' ? $effectiveUrl : $url,
+    ];
+}
+
 function github_list_person_media(string $owner, string $repo, string $personId): array
 {
-    $base = github_get_repository_default_branch($owner, $repo, github_api_token());
+    try {
+        $base = github_get_repository_default_branch($owner, $repo, github_api_token());
+    } catch (RuntimeException $error) {
+        if (github_is_empty_repository_error($error)) {
+            return [];
+        }
+        throw $error;
+    }
+
     $url = sprintf(
         'https://api.github.com/repos/%s/%s/contents/%s?ref=%s',
         rawurlencode($owner),
         rawurlencode($repo),
-        github_encode_repo_path('people/' . $personId . '/data/images'),
+        github_encode_repo_path(github_person_media_directory($personId)),
         rawurlencode($base['branch']),
     );
 
@@ -3368,7 +3769,7 @@ function github_encode_ref_for_raw(string $value): string
  */
 function github_person_media_pending(string $owner, string $repo, string $personId): array
 {
-    $imagesDir = 'people/' . $personId . '/data/images';
+    $imagesDir = github_person_media_directory($personId);
     $pullRequests = github_fetch_open_pull_requests($owner, $repo, true, [$imagesDir]);
     $entries = [];
 
@@ -3421,9 +3822,9 @@ function github_pull_request_is_person_media(array $pullRequest, string $personI
         return false;
     }
 
-    $imagesDir = 'people/' . $personId . '/data/images';
+    $imagesDir = github_person_media_directory($personId);
     $bodyPath = github_extract_page_path_from_pull_request_body($pullRequest);
-    if ($bodyPath !== '' && str_starts_with($bodyPath, $imagesDir . '/')) {
+    if ($bodyPath !== '' && ($bodyPath === $imagesDir || str_starts_with($bodyPath, $imagesDir . '/'))) {
         return true;
     }
 
@@ -3478,8 +3879,28 @@ function github_commit_person_media_to_default_branch_with_token(
     $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
     $commitIdentity = github_editor_commit_identity($user);
 
-    $base = github_get_repository_default_branch($owner, $repo, $token);
-    $baseBranch = $base['branch'];
+    try {
+        $base = github_get_repository_default_branch($owner, $repo, $token);
+        $baseBranch = $base['branch'];
+    } catch (RuntimeException $error) {
+        if (!github_is_empty_repository_error($error)) {
+            throw $error;
+        }
+
+        if ($action === 'delete') {
+            throw new RuntimeException('The requested image could not be found in the repository.');
+        }
+
+        return github_create_initial_file_on_default_branch(
+            $owner,
+            $repo,
+            $path,
+            (string) $binaryContent,
+            $commitMessage,
+            $token,
+            $commitIdentity,
+        );
+    }
 
     $existingFile = github_get_file_metadata_on_branch($owner, $repo, $path, $baseBranch, $token);
     $existingSha = is_array($existingFile) ? (string) ($existingFile['sha'] ?? '') : '';
@@ -3947,4 +4368,183 @@ function github_create_files_edit_pull_request(
     }
 
     throw new RuntimeException(github_build_publish_token_help_message($failures));
+}
+
+function github_group_workspace_files_by_repository(array $files): array
+{
+    $groups = [];
+
+    foreach ($files as $file) {
+        if (!is_array($file)) {
+            continue;
+        }
+
+        $context = github_repository_context_for_workspace_path((string) ($file['path'] ?? ''));
+        $groupKey = $context['repo_slug'];
+        if (!isset($groups[$groupKey])) {
+            $groups[$groupKey] = [
+                'kind' => $context['kind'],
+                'owner' => $context['owner'],
+                'repo' => $context['repo'],
+                'repo_slug' => $context['repo_slug'],
+                'files' => [],
+            ];
+        }
+
+        $groups[$groupKey]['files'][] = [
+            'workspace_path' => $context['workspace_path'],
+            'repo_path' => $context['repo_path'],
+            'content' => (string) ($file['content'] ?? ''),
+        ];
+    }
+
+    return array_values($groups);
+}
+
+function github_select_primary_publish_result(array $results): array
+{
+    foreach ($results as $result) {
+        if (!($result['published_directly'] ?? false) && ($result['kind'] ?? '') === 'site') {
+            return $result;
+        }
+    }
+    foreach ($results as $result) {
+        if (!($result['published_directly'] ?? false)) {
+            return $result;
+        }
+    }
+    foreach ($results as $result) {
+        if (($result['kind'] ?? '') === 'site') {
+            return $result;
+        }
+    }
+
+    return $results[0] ?? [];
+}
+
+function github_publish_workspace_files(
+    array $files,
+    array $editor,
+    string $commitMessage,
+    string $prTitle = '',
+    string $prBody = '',
+): array {
+    $grouped = github_group_workspace_files_by_repository($files);
+    if ($grouped === []) {
+        throw new RuntimeException('At least one file is required.');
+    }
+
+    $user = is_array($editor['user'] ?? null) ? $editor['user'] : null;
+    if ($prBody === '') {
+        $workspacePaths = [];
+        foreach ($grouped as $group) {
+            foreach ($group['files'] as $file) {
+                $workspacePaths[] = (string) ($file['workspace_path'] ?? '');
+            }
+        }
+        $workspacePaths = array_values(array_unique(array_filter($workspacePaths, 'strlen')));
+        $displayName = trim((string) ($user['displayName'] ?? $user['login'] ?? 'editor'));
+        $login = trim((string) ($user['login'] ?? ''));
+        $pathList = implode(', ', array_map(static fn (string $path): string => '`' . $path . '`', $workspacePaths));
+        $prBody = implode("\n", [
+            'This update changes ' . ($pathList !== '' ? $pathList : 'the requested files') . '.',
+            '',
+            'Edited by ' . $displayName . ($login !== '' ? ' (@' . $login . ')' : '') . '.',
+        ]);
+    }
+
+    $results = [];
+    foreach ($grouped as $group) {
+        $workspacePaths = array_map(static fn (array $file): string => $file['workspace_path'], $group['files']);
+        $repoFiles = array_map(static fn (array $file): array => [
+            'path' => $file['repo_path'],
+            'content' => $file['content'],
+        ], $group['files']);
+
+        $canPublishDirectly = github_user_can_direct_publish_paths(
+            $group['owner'],
+            $group['repo'],
+            $workspacePaths,
+            $user,
+        );
+
+        if ($canPublishDirectly) {
+            $publish = github_commit_files_to_default_branch(
+                $group['owner'],
+                $group['repo'],
+                $repoFiles,
+                $editor,
+                $commitMessage,
+            );
+
+            $results[] = [
+                'kind' => $group['kind'],
+                'repo' => $group['repo_slug'],
+                'path' => $workspacePaths[0] ?? '',
+                'paths' => $workspacePaths,
+                'repo_paths' => array_column($group['files'], 'repo_path'),
+                'branch' => $publish['branch'],
+                'base_branch' => $publish['branch'],
+                'commit' => $publish['commit'],
+                'pull_request' => null,
+                'published_directly' => true,
+            ];
+            continue;
+        }
+
+        $publish = github_create_files_edit_pull_request(
+            $group['owner'],
+            $group['repo'],
+            $repoFiles,
+            $editor,
+            $commitMessage,
+            $prTitle !== '' ? $prTitle : $commitMessage,
+            $prBody,
+        );
+
+        $results[] = [
+            'kind' => $group['kind'],
+            'repo' => $group['repo_slug'],
+            'path' => $workspacePaths[0] ?? '',
+            'paths' => $workspacePaths,
+            'repo_paths' => array_column($group['files'], 'repo_path'),
+            'branch' => $publish['branch'],
+            'base_branch' => $publish['base_branch'],
+            'commit' => $publish['commit'],
+            'pull_request' => $publish['pull_request'],
+            'published_directly' => false,
+        ];
+    }
+
+    $primary = github_select_primary_publish_result($results);
+    $secondary = [];
+    $primarySerialized = json_encode($primary);
+    foreach ($results as $result) {
+        if (json_encode($result) === $primarySerialized) {
+            continue;
+        }
+        $secondary[] = $result;
+    }
+
+    $allPaths = [];
+    foreach ($results as $result) {
+        foreach ($result['paths'] as $path) {
+            if (!in_array($path, $allPaths, true)) {
+                $allPaths[] = $path;
+            }
+        }
+    }
+
+    return [
+        'repo' => (string) ($primary['repo'] ?? ''),
+        'path' => (string) ($primary['path'] ?? ''),
+        'paths' => $allPaths,
+        'branch' => (string) ($primary['branch'] ?? ''),
+        'base_branch' => (string) ($primary['base_branch'] ?? ''),
+        'commit' => $primary['commit'] ?? null,
+        'pull_request' => $primary['pull_request'] ?? null,
+        'published_directly' => !array_filter($results, static fn (array $result): bool => !($result['published_directly'] ?? false)),
+        'results' => $results,
+        'secondary_results' => $secondary,
+    ];
 }

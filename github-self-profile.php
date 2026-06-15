@@ -62,6 +62,10 @@ $repoConfig = github_repo_config();
 $owner = $repoConfig['owner'];
 $repo = $repoConfig['repo'];
 $repoSlug = $owner . '/' . $repo;
+$peopleDbRepoConfig = github_people_db_repo_config();
+$peopleDbOwner = $peopleDbRepoConfig['owner'];
+$peopleDbRepo = $peopleDbRepoConfig['repo'];
+$peopleDbRepoSlug = $peopleDbOwner . '/' . $peopleDbRepo;
 $user = is_array($editor['user'] ?? null) ? $editor['user'] : [];
 $login = trim((string) ($user['login'] ?? ''));
 
@@ -190,14 +194,14 @@ function github_self_profile_validate_create_files(array $payload, string $perso
         ], 400);
     }
 
+    $recordPath = github_person_record_path($personId);
+    $ownershipPath = github_person_ownership_path($personId);
+
     $allowed = [
+        'people/' . $personId . '/index.html' => true,
         'people/' . $personId . '/profile.html' => true,
-        'people/' . $personId . '/profile.json' => true,
-        'people/' . $personId . '/data/profile.html' => true,
-        'people/' . $personId . '/data/profile-table.html' => true,
-        'people/' . $personId . '/data/family-tree.ged' => true,
-        'people/' . $personId . '/data/tree.html' => true,
-        'people/' . $personId . '/data/media.html' => true,
+        $recordPath => true,
+        $ownershipPath => true,
         'people/people.json' => true,
     ];
 
@@ -227,11 +231,10 @@ function github_self_profile_validate_create_files(array $payload, string $perso
     }
 
     $required = [
+        'people/' . $personId . '/index.html',
         'people/' . $personId . '/profile.html',
-        'people/' . $personId . '/profile.json',
-        'people/' . $personId . '/data/profile.html',
-        'people/' . $personId . '/data/profile-table.html',
-        'people/' . $personId . '/data/family-tree.ged',
+        $recordPath,
+        $ownershipPath,
     ];
 
     foreach ($required as $path) {
@@ -244,7 +247,7 @@ function github_self_profile_validate_create_files(array $payload, string $perso
         }
     }
 
-    $profileJsonPath = 'people/' . $personId . '/profile.json';
+    $profileJsonPath = github_person_ownership_path($personId);
     $profileConfig = json_decode($filesByPath[$profileJsonPath]['content'], true);
     $profileConfig = is_array($profileConfig) ? $profileConfig : [];
     $fallbackName = trim((string) ($profileConfig['owner']['name'] ?? $profileConfig['creator']['name'] ?? ''));
@@ -284,13 +287,13 @@ if ($action === 'claim') {
     }
 
     $nextConfig = github_self_profile_apply_claim($profileConfig, $personId, $user, (string) ($profileConfig['owner']['name'] ?? ''));
-    $path = 'people/' . $personId . '/profile.json';
+    $path = github_person_ownership_path($personId);
     $content = github_self_profile_json($nextConfig);
 
     if ($content === github_self_profile_json($profileConfig)) {
         github_json([
             'ok' => true,
-            'repo' => $repoSlug,
+            'repo' => $peopleDbRepoSlug,
             'person' => $personId,
             'action' => 'claim',
             'commit' => null,
@@ -304,18 +307,20 @@ if ($action === 'claim') {
     }
 
     try {
-        $result = github_commit_files_to_default_branch($owner, $repo, [[
+        $result = github_publish_workspace_files([[
             'path' => $path,
             'content' => $content,
-        ]], $editor, $commitMessage);
+        ]], $editor, $commitMessage, $commitMessage, '');
 
         github_json([
             'ok' => true,
-            'repo' => $repoSlug,
+            'repo' => $result['repo'],
             'person' => $personId,
             'action' => 'claim',
             'branch' => $result['branch'],
             'commit' => $result['commit'],
+            'pull_request' => $result['pull_request'],
+            'results' => $result['results'],
             'claimed_at' => gmdate('c'),
         ]);
     } catch (Throwable $error) {
@@ -330,8 +335,15 @@ if ($action === 'claim') {
 // action === create
 try {
     $base = github_get_repository_default_branch($owner, $repo, github_api_token());
-    $existingProfile = github_get_file_metadata_on_branch($owner, $repo, 'people/' . $personId . '/profile.html', $base['branch'], github_api_token());
-    $existingMetadata = github_get_file_metadata_on_branch($owner, $repo, 'people/' . $personId . '/profile.json', $base['branch'], github_api_token());
+    $dbBase = github_get_repository_default_branch($peopleDbOwner, $peopleDbRepo, github_api_token());
+    $existingProfile = github_get_file_metadata_on_branch($owner, $repo, 'people/' . $personId . '/index.html', $base['branch'], github_api_token());
+    $existingMetadata = github_get_file_metadata_on_branch(
+        $peopleDbOwner,
+        $peopleDbRepo,
+        github_people_db_repo_path(github_person_record_path($personId)),
+        $dbBase['branch'],
+        github_api_token(),
+    );
     if ($existingProfile !== null || $existingMetadata !== null) {
         github_json([
             'ok' => false,
@@ -354,16 +366,20 @@ if ($commitMessage === '') {
 }
 
 try {
-    $result = github_commit_files_to_default_branch($owner, $repo, $files, $editor, $commitMessage);
+    $result = github_publish_workspace_files($files, $editor, $commitMessage, $commitMessage, '');
 
     github_json([
         'ok' => true,
-        'repo' => $repoSlug,
+        'repo' => $result['repo'],
         'person' => $personId,
         'action' => 'create',
-        'paths' => $result['files'],
+        'paths' => $result['paths'],
         'branch' => $result['branch'],
+        'base_branch' => $result['base_branch'],
         'commit' => $result['commit'],
+        'pull_request' => $result['pull_request'],
+        'published_directly' => (bool) $result['published_directly'],
+        'results' => $result['results'],
         'published_at' => gmdate('c'),
     ]);
 } catch (Throwable $error) {

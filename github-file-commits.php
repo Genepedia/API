@@ -25,10 +25,20 @@ if ($paths === null) {
 
 github_ensure_file_api_authenticated();
 
-$repoConfig = github_repo_config();
-$owner = $repoConfig['owner'];
-$repo = $repoConfig['repo'];
-$repoSlug = $owner . '/' . $repo;
+$repoContext = github_repository_context_for_paths($paths);
+if ($repoContext === null) {
+    github_json([
+        'ok' => false,
+        'error' => 'invalid_path',
+        'message' => 'Commit history can only be fetched for paths from a single repository at a time.',
+    ], 400);
+}
+
+$owner = $repoContext['owner'];
+$repo = $repoContext['repo'];
+$repoSlug = $repoContext['repo_slug'];
+$repoPaths = $repoContext['repo_paths'];
+$workspacePaths = $repoContext['workspace_paths'];
 
 $limit = null;
 if (isset($_GET['limit'])) {
@@ -36,12 +46,13 @@ if (isset($_GET['limit'])) {
 }
 
 try {
-    $commits = github_fetch_merged_file_commits($owner, $repo, $paths, $limit);
+    $commits = github_fetch_merged_file_commits($owner, $repo, $repoPaths, $limit);
 
     github_json([
         'ok' => true,
-        'path' => $paths[0],
-        'paths' => $paths,
+        'path' => $workspacePaths[0],
+        'paths' => $workspacePaths,
+        'repo_paths' => $repoPaths,
         'repo' => $repoSlug,
         'commits' => $commits,
         'count' => count($commits),

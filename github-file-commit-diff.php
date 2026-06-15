@@ -27,31 +27,43 @@ if ($paths === null || $hash === null) {
 
 github_ensure_file_api_authenticated();
 
-$repoConfig = github_repo_config();
-$owner = $repoConfig['owner'];
-$repo = $repoConfig['repo'];
-$repoSlug = $owner . '/' . $repo;
+$repoContext = github_repository_context_for_paths($paths);
+if ($repoContext === null) {
+    github_json([
+        'ok' => false,
+        'error' => 'invalid_request',
+        'message' => 'Diff lookups can only target paths from a single repository at a time.',
+    ], 400);
+}
+
+$owner = $repoContext['owner'];
+$repo = $repoContext['repo'];
+$repoSlug = $repoContext['repo_slug'];
+$repoPaths = $repoContext['repo_paths'];
+$workspacePaths = $repoContext['workspace_paths'];
 
 try {
-    if (count($paths) === 1) {
-        $diff = github_fetch_file_commit_diff($owner, $repo, $paths[0], $hash);
+    if (count($repoPaths) === 1) {
+        $diff = github_fetch_file_commit_diff($owner, $repo, $repoPaths[0], $hash);
 
         github_json([
             'ok' => true,
             'repo' => $repoSlug,
-            'path' => $paths[0],
-            'paths' => $paths,
+            'path' => $workspacePaths[0],
+            'paths' => $workspacePaths,
+            'repo_paths' => $repoPaths,
             'diff' => $diff,
             'fetched_at' => gmdate('c'),
         ]);
     }
 
-    $diffs = github_fetch_file_commit_diffs($owner, $repo, $paths, $hash);
+    $diffs = github_fetch_file_commit_diffs($owner, $repo, $repoPaths, $hash);
 
     github_json([
         'ok' => true,
         'repo' => $repoSlug,
-        'paths' => $paths,
+        'paths' => $workspacePaths,
+        'repo_paths' => $repoPaths,
         'diffs' => $diffs,
         'fetched_at' => gmdate('c'),
     ]);
