@@ -14,9 +14,12 @@ if ($method === 'OPTIONS') {
 
 github_ensure_file_api_authenticated();
 
-$repoConfig = github_repo_config();
-$owner = $repoConfig['owner'];
-$repo = $repoConfig['repo'];
+$siteRepoConfig = github_repo_config();
+$siteOwner = $siteRepoConfig['owner'];
+$siteRepo = $siteRepoConfig['repo'];
+$mediaRepoConfig = github_media_repo_config();
+$owner = $mediaRepoConfig['owner'];
+$repo = $mediaRepoConfig['repo'];
 $repoSlug = $owner . '/' . $repo;
 
 if ($method === 'GET') {
@@ -30,7 +33,7 @@ if ($method === 'GET') {
     }
 
     try {
-        $profileConfig = github_fetch_person_profile_config($owner, $repo, $personId);
+        $profileConfig = github_fetch_person_profile_config($siteOwner, $siteRepo, $personId);
         $user = github_current_user();
 
         $pending = [];
@@ -46,7 +49,7 @@ if ($method === 'GET') {
             'person' => $personId,
             'images' => github_list_person_media($owner, $repo, $personId),
             'pending' => $pending,
-            'can_manage' => github_profile_can_manage($owner, $repo, $personId, $user),
+            'can_manage' => github_profile_can_manage($siteOwner, $siteRepo, $personId, $user),
             'manager_logins' => github_person_profile_logins($profileConfig),
             'fetched_at' => gmdate('c'),
         ]);
@@ -118,7 +121,7 @@ if ($action === 'approve' || $action === 'decline') {
     }
 
     try {
-        $profileConfig = github_fetch_person_profile_config($owner, $repo, $personId);
+        $profileConfig = github_fetch_person_profile_config($siteOwner, $siteRepo, $personId);
     } catch (Throwable $error) {
         github_json([
             'ok' => false,
@@ -127,11 +130,11 @@ if ($action === 'approve' || $action === 'decline') {
         ], 502);
     }
 
-    if (!github_profile_can_manage($owner, $repo, $personId, $editor['user'])) {
+    if (!github_profile_can_manage($siteOwner, $siteRepo, $personId, $editor['user'])) {
         github_json([
             'ok' => false,
             'error' => 'not_allowed',
-            'message' => 'Only the creator, owner or maintainers of this profile can review its images.',
+            'message' => 'Only the creator, owner or maintainers of this profile can review its media.',
         ], 403);
     }
 
@@ -185,7 +188,7 @@ if ($filename === null) {
     github_json([
         'ok' => false,
         'error' => 'invalid_filename',
-        'message' => 'Image filename must use letters, numbers, dashes and end in '
+        'message' => 'Media filename must use letters, numbers, dashes and end in '
             . implode(', ', GITHUB_MEDIA_ALLOWED_EXTENSIONS) . '.',
     ], 400);
 }
@@ -205,7 +208,7 @@ $login = trim((string) ($user['login'] ?? ''));
 $displayName = trim((string) ($user['displayName'] ?? $login));
 
 try {
-    $profileConfig = github_fetch_person_profile_config($owner, $repo, $personId);
+    $profileConfig = github_fetch_person_profile_config($siteOwner, $siteRepo, $personId);
 } catch (Throwable $error) {
     github_json([
         'ok' => false,
@@ -214,27 +217,42 @@ try {
     ], 502);
 }
 
-if (!github_profile_can_manage($owner, $repo, $personId, $user)) {
+if (!github_profile_can_manage($siteOwner, $siteRepo, $personId, $user)) {
     github_json([
         'ok' => false,
         'error' => 'not_allowed',
-        'message' => 'Only the creator, owner or maintainers of this profile can manage its images.',
+        'message' => 'Only the creator, owner or maintainers of this profile can manage its media.',
     ], 403);
 }
 
-$path = 'people/' . $personId . '/data/images/' . $filename;
+$path = github_person_media_file_path($personId, $filename);
 $binaryContent = null;
 
 if ($action === 'upload') {
     $contentBase64 = (string) ($payload['content_base64'] ?? '');
     $contentBase64 = preg_replace('/^data:[^;]+;base64,/', '', trim($contentBase64)) ?? '';
-    $binaryContent = base64_decode($contentBase64, true);
+    $sourceUrl = trim((string) ($payload['source_url'] ?? ''));
+
+    if ($contentBase64 !== '') {
+        $binaryContent = base64_decode($contentBase64, true);
+    } elseif ($sourceUrl !== '') {
+        try {
+            $download = github_fetch_remote_media($sourceUrl);
+            $binaryContent = (string) ($download['content'] ?? '');
+        } catch (Throwable $error) {
+            github_json([
+                'ok' => false,
+                'error' => 'invalid_source_url',
+                'message' => $error->getMessage(),
+            ], 400);
+        }
+    }
 
     if (!is_string($binaryContent) || $binaryContent === '') {
         github_json([
             'ok' => false,
             'error' => 'invalid_content',
-            'message' => 'Image content must be provided as base64.',
+            'message' => 'Media content must be provided as base64 or a Geni media link.',
         ], 400);
     }
 
@@ -242,7 +260,7 @@ if ($action === 'upload') {
         github_json([
             'ok' => false,
             'error' => 'image_too_large',
-            'message' => 'Images must be smaller than ' . round(GITHUB_MEDIA_MAX_BYTES / 1_000_000) . ' MB.',
+            'message' => 'Media files must be smaller than ' . round(GITHUB_MEDIA_MAX_BYTES / 1_000_000) . ' MB.',
         ], 400);
     }
 }

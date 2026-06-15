@@ -1311,7 +1311,7 @@ function github_people_db_submodule_path(): string
 
 function github_people_db_legacy_workspace_root(): string
 {
-    return 'data/people/v1';
+    return 'data/people';
 }
 
 function github_people_db_workspace_path(string $path = ''): string
