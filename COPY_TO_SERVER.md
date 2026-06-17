@@ -58,12 +58,17 @@
 3. Fill in `.env` in this repository (every `FILL_IN` value), then upload it next to
    the PHP files on the server. The file is ignored by git.
 
+   Optional: to enable the username/password form on the standalone
+   `pages/login.html` page (which posts to `local-login.php`), also set
+   `LOCAL_LOGIN_USERNAME` plus `LOCAL_LOGIN_PASSWORD` (or `LOCAL_LOGIN_PASSWORD_HASH`).
+   Leave `LOCAL_LOGIN_USERNAME` blank to disable that form (GitHub login still works).
+
    Double-check the two IDs are not swapped:
    - `GITHUB_APP_ID` = numeric **App ID**
    - `GITHUB_CLIENT_ID` = **Client ID** starting with `Iv1.`
 
 4. Upload the **updated PHP files** (`github-auth.php`, `github-handoff.php`,
-   `github-config.php`, etc.)
+   `github-config.php`, `local-login.php`, etc.)
    and the private key next to the PHP files (do **not** commit the key):
 
    ```

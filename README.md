@@ -4,6 +4,7 @@ Shared API between Genepedia projects.
 
 ## Endpoints
 
+- `local-login.php` — validates the username/password from the standalone `pages/login.html` page against `.env` and issues a login handoff. See "Standalone login page" below.
 - `github-login.php`
 - `github-callback.php`
 - `github-handoff.php` — exchanges a one-time post-login code for a user access token (used when cross-site cookies are blocked)
@@ -43,6 +44,30 @@ optional.
 
 The `.env` file and private keys are ignored and should not be committed.
 See `COPY_TO_SERVER.md` for full deployment steps.
+
+## Standalone login page
+
+The sign-in page itself lives in the **site** repo at `pages/login.html`. It is
+**not linked anywhere** on the public site, is served `noindex`, and is left out
+of `sitemap.xml`. Access it directly, e.g. `https://www.genepedia.org/pages/login.html`.
+It offers two ways in:
+
+- **Username / password** — the page posts the credentials to `local-login.php`,
+  which validates them server-side against `.env`:
+  - `LOCAL_LOGIN_USERNAME` — the allowed username (leave blank to disable this form entirely).
+  - `LOCAL_LOGIN_PASSWORD` — plaintext password, **or**
+  - `LOCAL_LOGIN_PASSWORD_HASH` — a bcrypt hash (recommended; takes priority over the plaintext value).
+    Generate one with `php -r 'echo password_hash("your-password", PASSWORD_DEFAULT), "\n";'`.
+  - `LOCAL_LOGIN_DISPLAY_NAME` — optional name shown in the header after sign-in.
+- **Continue with GitHub** — the normal GitHub OAuth flow (unchanged).
+
+On a successful username/password sign-in, `local-login.php` issues the same
+one-time login handoff that GitHub login uses; the page redirects to the home
+page with that handoff code and the front-end completes sign-in. The public
+header "Log In" button is unchanged and still uses GitHub only.
+
+Note: the local user is not backed by a GitHub access token, so it can browse
+signed-in but cannot publish edits to GitHub. Use GitHub login for editing.
 
 `github-file-commits.php` accepts `?path=pages/privacy_policy.html` or a comma-separated
 `?paths=people/15/profile.html,people/15/data/profile.html,...` query for merged profile
