@@ -65,8 +65,10 @@
 
    Statistics (`profile-views.json`, search queries, daily rollups) are written
    automatically to `data/Genepedia-Database/statistics` inside the Genepedia
-   site checkout. The API discovers that folder on disk — no extra `.env`
-   setting is required when the API and site share the same machine.
+   site checkout and committed to the `Genepedia` repository. Signed-in users
+   commit as themselves; anonymous views and searches commit as the GitHub App
+   bot. Set `GITHUB_STATISTICS_SYNC=0` to disable GitHub commits during local
+   development.
 
    Double-check the two IDs are not swapped:
    - `GITHUB_APP_ID` = numeric **App ID**

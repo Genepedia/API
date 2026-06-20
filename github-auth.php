@@ -2057,6 +2057,42 @@ function github_editor_commit_identity(array $user): array
     ];
 }
 
+function github_app_commit_identity(): array
+{
+    $configuredName = trim(github_env_value('GITHUB_STATISTICS_BOT_NAME'));
+    $name = $configuredName !== '' ? $configuredName : 'Genepedia';
+    if (!str_ends_with(strtolower($name), '[bot]')) {
+        $name .= '[bot]';
+    }
+
+    $appId = trim(github_env_value('GITHUB_APP_ID'));
+    $slug = strtolower((string) (preg_replace('/[^a-z0-9]+/', '-', str_replace('[bot]', '', strtolower($name))) ?? ''));
+    $slug = trim($slug, '-');
+    if ($slug === '') {
+        $slug = 'genepedia';
+    }
+
+    $email = $appId !== ''
+        ? $appId . '+' . $slug . '@users.noreply.github.com'
+        : $slug . '@users.noreply.github.com';
+
+    return [
+        'name' => $name,
+        'email' => $email,
+    ];
+}
+
+function github_app_statistics_actor(): array
+{
+    $identity = github_app_commit_identity();
+
+    return [
+        'displayName' => (string) $identity['name'],
+        'login' => (string) $identity['name'],
+        'email' => (string) $identity['email'],
+    ];
+}
+
 function github_publish_token_candidates(array $editor): array
 {
     $candidates = [];

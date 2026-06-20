@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 require __DIR__ . '/github-auth.php';
 
+if (strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET')) === 'POST') {
+    github_start_session();
+}
+
 github_apply_cors();
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
@@ -15,14 +19,22 @@ if ($method === 'OPTIONS') {
 
 if ($method === 'GET') {
     $limit = max(1, min(24, (int) ($_GET['limit'] ?? 4)));
+    $window = strtolower(trim((string) ($_GET['window'] ?? 'all')));
 
     try {
         github_json([
             'ok' => true,
-            'profiles' => github_popular_profiles($limit),
+            'window' => github_statistics_normalize_window($window),
+            'profiles' => github_popular_profiles($limit, $window),
             'storage_path' => github_statistics_workspace_relative_path('profile-views.json'),
             'fetched_at' => gmdate('c'),
         ]);
+    } catch (InvalidArgumentException $error) {
+        github_json([
+            'ok' => false,
+            'error' => 'invalid_window',
+            'message' => $error->getMessage(),
+        ], 400);
     } catch (Throwable $error) {
         github_json([
             'ok' => false,
@@ -58,6 +70,7 @@ try {
     github_json([
         'ok' => true,
         'profile' => $result['profile'] ?? null,
+        'publish' => $result['publish'] ?? null,
         'storage_path' => github_statistics_workspace_relative_path('profile-views.json'),
     ]);
 } catch (InvalidArgumentException $error) {
