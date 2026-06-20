@@ -4564,3 +4564,5 @@ function github_publish_workspace_files(
         'secondary_results' => $secondary,
     ];
 }
+
+require __DIR__ . '/github-statistics-store.php';

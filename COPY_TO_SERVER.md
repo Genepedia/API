@@ -63,6 +63,11 @@
    `LOCAL_LOGIN_USERNAME` plus `LOCAL_LOGIN_PASSWORD` (or `LOCAL_LOGIN_PASSWORD_HASH`).
    Leave `LOCAL_LOGIN_USERNAME` blank to disable that form (GitHub login still works).
 
+   Statistics (`profile-views.json`, search queries, daily rollups) are written
+   automatically to `data/Genepedia-Database/statistics` inside the Genepedia
+   site checkout. The API discovers that folder on disk — no extra `.env`
+   setting is required when the API and site share the same machine.
+
    Double-check the two IDs are not swapped:
    - `GITHUB_APP_ID` = numeric **App ID**
    - `GITHUB_CLIENT_ID` = **Client ID** starting with `Iv1.`
