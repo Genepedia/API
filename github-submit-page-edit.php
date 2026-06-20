@@ -73,8 +73,21 @@ function github_submit_page_edit_validate_path(string $path): ?string
         return $dbPath;
     }
 
-    // Compatibility registry + sitemap.
-    if ($normalized === 'people/people.json' || $normalized === 'sitemap.xml') {
+    // Separate pets database (animals + their own families).
+    if (preg_match('#^data/Genepedia-Database/pets/(persons|unions)/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+\.json$#', $normalized)) {
+        return $normalized;
+    }
+    if (preg_match('#^data/Genepedia-Database/pets/index/(summary|search)/[a-zA-Z0-9_.-]+\.json$#', $normalized)
+        || $normalized === 'data/Genepedia-Database/pets/index/all-ids.json'
+        || $normalized === 'data/Genepedia-Database/pets/manifest.json') {
+        return $normalized;
+    }
+
+    // Compatibility registries + sitemap.
+    if ($normalized === 'pages/people/people.json'
+        || $normalized === 'pages/pets/pets.json'
+        || $normalized === 'people/people.json'
+        || $normalized === 'sitemap.xml') {
         return $normalized;
     }
 
@@ -101,11 +114,14 @@ if (is_array($payload['files'] ?? null) && $payload['files'] !== []) {
     ];
 }
 
-if ($rawFiles === [] || count($rawFiles) > 5) {
+// Up to 12 files per edit: a relationship save can additionally create linked
+// pet profiles (each adds its record, SEO shell, prose, and ownership) plus the
+// linking union and the registry, matching the new-profile endpoint's allowance.
+if ($rawFiles === [] || count($rawFiles) > 12) {
     github_json([
         'ok' => false,
         'error' => 'invalid_files',
-        'message' => 'Between one and five files can be published per edit.',
+        'message' => 'Between one and twelve files can be published per edit.',
     ], 400);
 }
 
@@ -114,11 +130,17 @@ foreach ($rawFiles as $entry) {
     $path = github_submit_page_edit_validate_path($entry['path']);
     $content = $entry['content'];
 
-    $isPagePath = $path !== null && str_starts_with($path, 'pages/');
-    $isPeopleShell = $path !== null && preg_match('#^people/[a-zA-Z0-9_-]+/index\.html$#', $path) === 1;
-    $isPeopleFragment = $path !== null && preg_match('#^people/[a-zA-Z0-9_-]+/(?:profile|[a-zA-Z0-9_.-]+)\.html$#', $path) === 1 && !$isPeopleShell;
+    // Profile shells/fragments live under pages/people/<id>/ and pages/pets/<id>/
+    // (legacy people/<id>/ still recognised). They are distinguished from generic
+    // editable site pages so their content rules apply correctly.
+    $profilePrefix = '(?:pages/(?:people|pets)|people)';
+    $isPeopleShell = $path !== null && preg_match('#^' . $profilePrefix . '/[a-zA-Z0-9_-]+/index\.html$#', $path) === 1;
+    $isPeopleFragment = $path !== null && preg_match('#^' . $profilePrefix . '/[a-zA-Z0-9_-]+/(?:profile|data/[a-zA-Z0-9_./-]+|[a-zA-Z0-9_.-]+)\.html$#', $path) === 1 && !$isPeopleShell;
+    $isPagePath = $path !== null && str_starts_with($path, 'pages/') && !$isPeopleShell && !$isPeopleFragment;
     $isDbJson = $path !== null && (
-        preg_match('#^data/Genepedia-Database/people/.+\.json$#', $path) === 1
+        preg_match('#^data/Genepedia-Database/(people|pets)/.+\.json$#', $path) === 1
+        || $path === 'pages/people/people.json'
+        || $path === 'pages/pets/pets.json'
         || $path === 'people/people.json'
     );
     $isSitemap = $path === 'sitemap.xml';

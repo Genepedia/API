@@ -197,12 +197,18 @@ function github_self_profile_validate_create_files(array $payload, string $perso
     $recordPath = github_person_record_path($personId);
     $ownershipPath = github_person_ownership_path($personId);
 
+    // Profiles live under pages/people/<id>/; pets under pages/pets/<id>/.
+    $profileKind = strtolower(trim((string) ($payload['profile_kind'] ?? 'person')));
+    $profileFolder = $profileKind === 'pet'
+        ? 'pages/pets/' . $personId
+        : 'pages/people/' . $personId;
+
     $allowed = [
-        'people/' . $personId . '/index.html' => true,
-        'people/' . $personId . '/profile.html' => true,
+        $profileFolder . '/index.html' => true,
+        $profileFolder . '/profile.html' => true,
         $recordPath => true,
         $ownershipPath => true,
-        'people/people.json' => true,
+        'pages/people/people.json' => true,
     ];
 
     $filesByPath = [];
@@ -231,8 +237,8 @@ function github_self_profile_validate_create_files(array $payload, string $perso
     }
 
     $required = [
-        'people/' . $personId . '/index.html',
-        'people/' . $personId . '/profile.html',
+        $profileFolder . '/index.html',
+        $profileFolder . '/profile.html',
         $recordPath,
         $ownershipPath,
     ];
@@ -336,7 +342,9 @@ if ($action === 'claim') {
 try {
     $base = github_get_repository_default_branch($owner, $repo, github_api_token());
     $dbBase = github_get_repository_default_branch($peopleDbOwner, $peopleDbRepo, github_api_token());
-    $existingProfile = github_get_file_metadata_on_branch($owner, $repo, 'people/' . $personId . '/index.html', $base['branch'], github_api_token());
+    $createKind = strtolower(trim((string) ($payload['profile_kind'] ?? 'person')));
+    $createFolder = $createKind === 'pet' ? 'pages/pets/' . $personId : 'pages/people/' . $personId;
+    $existingProfile = github_get_file_metadata_on_branch($owner, $repo, $createFolder . '/index.html', $base['branch'], github_api_token());
     $existingMetadata = github_get_file_metadata_on_branch(
         $peopleDbOwner,
         $peopleDbRepo,

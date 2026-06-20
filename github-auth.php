@@ -1435,7 +1435,7 @@ function github_repository_context_for_paths(array $paths): ?array
 
 function github_person_media_directory(string $personId): string
 {
-    return 'people/' . $personId;
+    return 'pages/people/' . $personId;
 }
 
 function github_person_media_file_path(string $personId, string $filename): string
@@ -3585,7 +3585,7 @@ function github_profile_can_manage(
     }
 
     try {
-        return github_repo_path_was_created_by_user($owner, $repo, 'people/' . $personId . '/index.html', $user);
+        return github_repo_path_was_created_by_user($owner, $repo, 'pages/people/' . $personId . '/index.html', $user);
     } catch (Throwable $error) {
         return false;
     }
@@ -4131,7 +4131,7 @@ function github_create_person_media_pull_request(
 
 function github_person_talk_path(string $personId): string
 {
-    return 'people/' . $personId . '/data/talk.json';
+    return 'pages/people/' . $personId . '/data/talk.json';
 }
 
 function github_fetch_person_talk(string $owner, string $repo, string $personId): array

@@ -68,7 +68,7 @@ function github_maintainers_target_from_paths(array $paths): ?array
             'type' => 'profile',
             'key' => 'profile:' . $personId,
             'person_id' => $personId,
-            'editable_path' => 'people/' . $personId . '/profile.html',
+            'editable_path' => 'pages/people/' . $personId . '/profile.html',
             'metadata_path' => github_person_ownership_path($personId),
             'label' => 'Profile ' . $personId,
         ];
