@@ -60,13 +60,18 @@ if ($method === 'GET') {
 
         if ($metric === 'manifest') {
             $manifest = github_statistics_read_json('manifest.json', static function (): array {
-                github_statistics_refresh_derived_files();
-                return github_statistics_read_json('manifest.json', static fn (): array => [
-                    'schema' => 'genepedia/statistics/manifest@2',
-                    'updatedAt' => github_statistics_now(),
-                    'windows' => github_statistics_window_keys(),
-                    'files' => [],
-                ]);
+                $profileViews = github_read_profile_views_store();
+                $searchQueries = github_read_search_queries_store();
+                $hourlyRollups = github_read_hourly_rollups_store();
+                $dailyRollups = github_read_daily_rollups_store();
+
+                return github_build_statistics_manifest(
+                    $profileViews,
+                    $searchQueries,
+                    $hourlyRollups,
+                    $dailyRollups,
+                    github_statistics_now(),
+                );
             });
             github_json([
                 'ok' => true,

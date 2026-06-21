@@ -8,105 +8,6 @@ const GITHUB_STATISTICS_SEARCH_QUERY_MAX_LENGTH = 80;
 const GITHUB_STATISTICS_TOP_SEARCH_LIMIT = 100;
 const GITHUB_STATISTICS_LEADERBOARD_LIMIT = 24;
 
-function github_statistics_root_dir(): string
-{
-    static $resolved = null;
-    if (is_string($resolved) && $resolved !== '') {
-        return $resolved;
-    }
-
-    $relativeStats = github_statistics_workspace_relative_path();
-    $candidates = github_statistics_root_dir_candidates($relativeStats);
-    $seen = [];
-
-    foreach ($candidates as $candidate) {
-        $path = rtrim(str_replace('\\', '/', (string) $candidate), '/');
-        if ($path === '' || isset($seen[$path])) {
-            continue;
-        }
-        $seen[$path] = true;
-
-        if (is_dir($path)) {
-            $resolved = $path;
-            return $resolved;
-        }
-
-        $parent = dirname($path);
-        if (is_dir($parent) && is_writable($parent)) {
-            $resolved = $path;
-            return $resolved;
-        }
-    }
-
-    throw new RuntimeException(
-        'Could not locate the Genepedia statistics directory at '
-        . $relativeStats
-        . '. Ensure the API can reach the Genepedia site checkout on disk.'
-    );
-}
-
-function github_statistics_root_dir_candidates(string $relativeStats): array
-{
-    $candidates = [];
-    $apiDir = realpath(__DIR__);
-    if ($apiDir === false) {
-        $apiDir = __DIR__;
-    }
-
-    $remember = static function (string $path) use (&$candidates): void {
-        $normalized = rtrim(str_replace('\\', '/', $path), '/');
-        if ($normalized !== '') {
-            $candidates[] = $normalized;
-        }
-    };
-
-    $remember(github_resolve_api_path('../Genepedia/' . $relativeStats));
-
-    $dir = $apiDir;
-    while ($dir !== false) {
-        if (is_file($dir . '/site-info.js') || is_dir($dir . '/data/Genepedia-Database/people')) {
-            $remember($dir . '/' . $relativeStats);
-        }
-
-        if (is_file($dir . '/people/manifest.json')) {
-            $remember($dir . '/statistics');
-        }
-
-        $parent = dirname($dir);
-        if ($parent === $dir) {
-            break;
-        }
-        $dir = $parent;
-    }
-
-    $parentDir = dirname($apiDir);
-    foreach (['Genepedia', 'genepedia'] as $siteDirName) {
-        $remember($parentDir . '/' . $siteDirName . '/' . $relativeStats);
-    }
-
-    $grandparentDir = dirname($parentDir);
-    if ($grandparentDir !== $parentDir) {
-        foreach (['Genepedia', 'genepedia'] as $siteDirName) {
-            $remember($grandparentDir . '/' . $siteDirName . '/' . $relativeStats);
-        }
-    }
-
-    $documentRoot = realpath((string) ($_SERVER['DOCUMENT_ROOT'] ?? ''));
-    if (is_string($documentRoot) && $documentRoot !== '') {
-        $remember($documentRoot . '/' . $relativeStats);
-
-        $documentParent = dirname($documentRoot);
-        if ($documentParent !== $documentRoot) {
-            foreach (['Genepedia', 'genepedia', ''] as $siteDirName) {
-                $base = $siteDirName === '' ? $documentParent : $documentParent . '/' . $siteDirName;
-                $remember($base . '/' . $relativeStats);
-            }
-        }
-    }
-
-    return $candidates;
-}
-
 function github_statistics_workspace_relative_path(string $file = ''): string
 {
     $clean = ltrim(str_replace('\\', '/', trim($file)), '/');
@@ -117,86 +18,159 @@ function github_statistics_workspace_relative_path(string $file = ''): string
     return github_people_db_submodule_path() . '/statistics/' . $clean;
 }
 
-function github_statistics_ensure_root(): string
+function github_statistics_repo_context(): array
 {
-    $root = github_statistics_root_dir();
-    if (!is_dir($root) && !mkdir($root, 0775, true) && !is_dir($root)) {
-        throw new RuntimeException('Could not create the statistics directory.');
+    static $context = null;
+    if (is_array($context)) {
+        return $context;
     }
 
-    return $root;
+    if (!github_api_token_configured()) {
+        throw new RuntimeException('GitHub API authentication is required for statistics.');
+    }
+
+    $repoConfig = github_repo_config();
+    $token = github_api_token();
+    $defaultBranch = github_get_repository_default_branch(
+        (string) $repoConfig['owner'],
+        (string) $repoConfig['repo'],
+        $token,
+    );
+
+    $context = [
+        'owner' => (string) $repoConfig['owner'],
+        'repo' => (string) $repoConfig['repo'],
+        'branch' => (string) ($defaultBranch['branch'] ?? 'main'),
+        'token' => $token,
+    ];
+
+    return $context;
 }
 
-function github_statistics_file_path(string $filename): string
+function github_statistics_request_state(): array
+{
+    static $memory = [];
+    static $dirty = [];
+    static $writeTransaction = false;
+
+    return [
+        'memory' => &$memory,
+        'dirty' => &$dirty,
+        'writeTransaction' => &$writeTransaction,
+    ];
+}
+
+function github_statistics_reset_request_state(): void
+{
+    $state = github_statistics_request_state();
+    $state['memory'] = [];
+    $state['dirty'] = [];
+    $state['writeTransaction'] = true;
+}
+
+function github_statistics_validate_filename(string $filename): string
 {
     $clean = ltrim(str_replace('\\', '/', trim($filename)), '/');
     if ($clean === '' || str_contains($clean, '..') || !preg_match('/^[a-z0-9][a-z0-9._-]*\.json$/i', $clean)) {
         throw new InvalidArgumentException('Invalid statistics filename.');
     }
 
-    return github_statistics_ensure_root() . '/' . $clean;
+    return $clean;
 }
 
-function github_statistics_read_json(string $filename, callable $defaultFactory): array
+function github_statistics_invoke_factory(callable|string $factory): array
 {
-    $path = github_statistics_file_path($filename);
-    if (!is_readable($path)) {
-        return $defaultFactory();
+    if (is_string($factory)) {
+        if (!function_exists($factory)) {
+            throw new RuntimeException('Statistics default factory not found: ' . $factory);
+        }
+        $result = $factory();
+    } else {
+        $result = $factory();
     }
 
-    $decoded = json_decode((string) file_get_contents($path), true);
-    if (!is_array($decoded)) {
-        return $defaultFactory();
+    return is_array($result) ? $result : [];
+}
+
+function github_statistics_read_json(string $filename, callable|string $defaultFactory): array
+{
+    $filename = github_statistics_validate_filename($filename);
+    $state = github_statistics_request_state();
+
+    if ($state['writeTransaction'] && isset($state['memory'][$filename])) {
+        return $state['memory'][$filename];
     }
 
-    return $decoded;
+    $context = github_statistics_repo_context();
+    $repoPath = github_statistics_workspace_relative_path($filename);
+    $metadata = github_get_file_metadata_on_branch(
+        $context['owner'],
+        $context['repo'],
+        $repoPath,
+        $context['branch'],
+        $context['token'],
+    );
+
+    if ($metadata === null) {
+        $data = github_statistics_invoke_factory($defaultFactory);
+        if ($state['writeTransaction']) {
+            $state['memory'][$filename] = $data;
+        }
+        return $data;
+    }
+
+    $content = github_decode_content_payload($metadata);
+    $decoded = is_string($content) ? json_decode($content, true) : null;
+    $data = is_array($decoded)
+        ? $decoded
+        : github_statistics_invoke_factory($defaultFactory);
+
+    if ($state['writeTransaction']) {
+        $state['memory'][$filename] = $data;
+    }
+
+    return $data;
 }
 
 function github_statistics_write_json(string $filename, array $data): void
 {
-    $path = github_statistics_file_path($filename);
-    $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
-    if (file_put_contents($path, $json, LOCK_EX) === false) {
-        throw new RuntimeException('Could not save statistics file: ' . $filename);
-    }
+    $filename = github_statistics_validate_filename($filename);
+    $state = github_statistics_request_state();
+    $state['memory'][$filename] = $data;
+    $state['dirty'][$filename] = true;
 }
 
-function github_statistics_mutate_json(string $filename, callable $defaultFactory, callable $mutator): array
+function github_statistics_mutate_json(string $filename, callable|string $defaultFactory, callable $mutator): array
 {
-    $path = github_statistics_file_path($filename);
-    github_statistics_ensure_root();
-    $handle = fopen($path, 'c+');
-    if ($handle === false) {
-        throw new RuntimeException('Could not open statistics file: ' . $filename);
+    $data = github_statistics_read_json($filename, $defaultFactory);
+    $result = $mutator($data);
+    github_statistics_write_json($filename, $data);
+
+    return is_array($result) ? $result : [];
+}
+
+function github_statistics_encode_json_file(array $data): string
+{
+    return json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
+}
+
+function github_statistics_build_commit_files(): array
+{
+    $state = github_statistics_request_state();
+    $files = [];
+
+    foreach (github_statistics_publish_filenames() as $filename) {
+        if (!($state['dirty'][$filename] ?? false) || !isset($state['memory'][$filename])) {
+            continue;
+        }
+
+        $files[] = [
+            'path' => github_statistics_workspace_relative_path($filename),
+            'content' => github_statistics_encode_json_file($state['memory'][$filename]),
+        ];
     }
 
-    try {
-        if (!flock($handle, LOCK_EX)) {
-            throw new RuntimeException('Could not lock statistics file: ' . $filename);
-        }
-
-        $contents = stream_get_contents($handle);
-        $data = is_string($contents) && trim($contents) !== ''
-            ? json_decode($contents, true)
-            : null;
-        if (!is_array($data)) {
-            $data = $defaultFactory();
-        }
-
-        $result = $mutator($data);
-        $json = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";
-        ftruncate($handle, 0);
-        rewind($handle);
-        if (fwrite($handle, $json) === false) {
-            throw new RuntimeException('Could not write statistics file: ' . $filename);
-        }
-        fflush($handle);
-        flock($handle, LOCK_UN);
-
-        return is_array($result) ? $result : [];
-    } finally {
-        fclose($handle);
-    }
+    return $files;
 }
 
 function github_statistics_now(): string
@@ -693,25 +667,20 @@ function github_build_statistics_leaderboards(int $limit = 8): array
 
 function github_read_statistics_leaderboards(): array
 {
-    $leaderboards = github_statistics_read_json('leaderboards.json', static function (): array {
-        return [];
-    });
+    $leaderboards = github_statistics_read_json('leaderboards.json', static fn (): array => []);
 
-    if (!isset($leaderboards['profiles']) || !is_array($leaderboards['profiles'])) {
-        github_statistics_refresh_derived_files();
-        return github_statistics_read_json('leaderboards.json', static fn (): array => github_build_statistics_leaderboards());
+    if (!isset($leaderboards['profiles']) || !is_array($leaderboards['profiles']) || $leaderboards['profiles'] === []) {
+        return github_build_statistics_leaderboards();
     }
 
     return $leaderboards;
 }
 
-function github_statistics_refresh_derived_files(): void
+function github_build_statistics_summary(array $leaderboards): array
 {
     $profileViews = github_read_profile_views_store();
     $searchQueries = github_read_search_queries_store();
     $dailyRollups = github_read_daily_rollups_store();
-    $hourlyRollups = github_read_hourly_rollups_store();
-    $leaderboards = github_build_statistics_leaderboards(GITHUB_STATISTICS_LEADERBOARD_LIMIT);
     $now = github_statistics_now();
     $today = github_statistics_today_key();
 
@@ -725,7 +694,7 @@ function github_statistics_refresh_derived_files(): void
         $totalSearches += max(0, (int) ($entry['count'] ?? 0));
     }
 
-    $summary = [
+    return [
         'schema' => 'genepedia/statistics/summary@2',
         'generatedAt' => $now,
         'windows' => github_statistics_window_keys(),
@@ -743,12 +712,20 @@ function github_statistics_refresh_derived_files(): void
         'popularProfiles' => $leaderboards['profiles']['all'] ?? github_popular_profiles(8),
         'popularSearches' => $leaderboards['searches']['all'] ?? github_popular_searches(8),
         'leaderboards' => [
-            'profiles' => $leaderboards['profiles'],
-            'searches' => $leaderboards['searches'],
+            'profiles' => $leaderboards['profiles'] ?? [],
+            'searches' => $leaderboards['searches'] ?? [],
         ],
     ];
+}
 
-    $manifest = [
+function github_build_statistics_manifest(
+    array $profileViews,
+    array $searchQueries,
+    array $hourlyRollups,
+    array $dailyRollups,
+    string $now,
+): array {
+    return [
         'schema' => 'genepedia/statistics/manifest@2',
         'updatedAt' => $now,
         'windows' => github_statistics_window_keys(),
@@ -779,6 +756,24 @@ function github_statistics_refresh_derived_files(): void
             ],
         ],
     ];
+}
+
+function github_statistics_refresh_derived_files(): void
+{
+    $profileViews = github_read_profile_views_store();
+    $searchQueries = github_read_search_queries_store();
+    $dailyRollups = github_read_daily_rollups_store();
+    $hourlyRollups = github_read_hourly_rollups_store();
+    $leaderboards = github_build_statistics_leaderboards(GITHUB_STATISTICS_LEADERBOARD_LIMIT);
+    $now = github_statistics_now();
+    $summary = github_build_statistics_summary($leaderboards);
+    $manifest = github_build_statistics_manifest(
+        $profileViews,
+        $searchQueries,
+        $hourlyRollups,
+        $dailyRollups,
+        $now,
+    );
 
     github_statistics_write_json('leaderboards.json', $leaderboards);
     github_statistics_write_json('summary.json', $summary);
@@ -796,29 +791,6 @@ function github_statistics_publish_filenames(): array
         'summary.json',
         'manifest.json',
     ];
-}
-
-function github_statistics_collect_publish_files(): array
-{
-    $files = [];
-    foreach (github_statistics_publish_filenames() as $filename) {
-        $path = github_statistics_file_path($filename);
-        if (!is_readable($path)) {
-            continue;
-        }
-
-        $content = file_get_contents($path);
-        if (!is_string($content)) {
-            continue;
-        }
-
-        $files[] = [
-            'path' => github_statistics_workspace_relative_path($filename),
-            'content' => $content,
-        ];
-    }
-
-    return $files;
 }
 
 function github_statistics_resolve_publish_editor(): array
@@ -866,54 +838,59 @@ function github_statistics_build_sync_commit_message(string $event, array $edito
     return $message . ' (' . $actorLabel . ')';
 }
 
-function github_statistics_sync_to_repository(string $event, array $context = []): array
+function github_statistics_flush_to_repository(string $event, array $context = []): array
 {
     if (trim(github_env_value('GITHUB_STATISTICS_SYNC')) === '0') {
-        return [
-            'synced' => false,
-            'skipped' => 'disabled',
-        ];
+        throw new RuntimeException('Statistics publishing is disabled (GITHUB_STATISTICS_SYNC=0).');
     }
 
-    try {
-        github_start_session();
-        $editor = github_statistics_resolve_publish_editor();
-        $files = github_statistics_collect_publish_files();
-        if ($files === []) {
-            return [
-                'synced' => false,
-                'skipped' => 'no_files',
-                'source' => $editor['source'],
-            ];
-        }
-
-        $repoConfig = github_repo_config();
-        $commitMessage = github_statistics_build_sync_commit_message($event, $editor, $context);
-        $publish = github_commit_files_to_default_branch_with_token(
-            $editor['token'],
-            $repoConfig['owner'],
-            $repoConfig['repo'],
-            $files,
-            [
-                'user' => $editor['user'],
-                'token' => $editor['token'],
-            ],
-            $commitMessage,
+    $publishAuth = github_publish_auth_status();
+    if (!($publishAuth['can_publish'] ?? false)) {
+        throw new RuntimeException(
+            (string) ($publishAuth['message'] ?? 'GitHub App lacks Contents write access on the Genepedia repository.'),
         );
+    }
 
-        return [
-            'synced' => true,
-            'source' => $editor['source'],
-            'repo' => $repoConfig['owner'] . '/' . $repoConfig['repo'],
-            'commit' => $publish['commit'] ?? null,
-        ];
-    } catch (Throwable $error) {
+    $files = github_statistics_build_commit_files();
+    if ($files === []) {
         return [
             'synced' => false,
-            'source' => isset($editor) && is_array($editor) ? ($editor['source'] ?? null) : null,
-            'error' => $error->getMessage(),
+            'skipped' => 'no_changes',
         ];
     }
+
+    github_start_session();
+    $editor = github_statistics_resolve_publish_editor();
+    $repoConfig = github_repo_config();
+    $commitMessage = github_statistics_build_sync_commit_message($event, $editor, $context);
+    $lastError = null;
+
+    for ($attempt = 0; $attempt < 2; $attempt++) {
+        try {
+            $publish = github_commit_files_to_default_branch_with_token(
+                $editor['token'],
+                (string) $repoConfig['owner'],
+                (string) $repoConfig['repo'],
+                $files,
+                [
+                    'user' => $editor['user'],
+                    'token' => $editor['token'],
+                ],
+                $commitMessage,
+            );
+
+            return [
+                'synced' => true,
+                'source' => $editor['source'],
+                'repo' => $repoConfig['owner'] . '/' . $repoConfig['repo'],
+                'commit' => $publish['commit'] ?? null,
+            ];
+        } catch (RuntimeException $error) {
+            $lastError = $error;
+        }
+    }
+
+    throw new RuntimeException($lastError?->getMessage() ?? 'Could not commit statistics to GitHub.');
 }
 
 function github_increment_profile_view(string $kind, string $personId): array
@@ -1149,35 +1126,10 @@ function github_popular_searches(int $limit = 8, string $window = 'all'): array
 
 function github_read_statistics_summary(): array
 {
-    $summary = github_statistics_read_json('summary.json', static function (): array {
-        github_statistics_refresh_derived_files();
-        return github_statistics_read_json('summary.json', static fn (): array => [
-            'schema' => 'genepedia/statistics/summary@2',
-            'generatedAt' => github_statistics_now(),
-            'windows' => github_statistics_window_keys(),
-            'totals' => [
-                'profileViews' => 0,
-                'searches' => 0,
-                'profilesTracked' => 0,
-                'queriesTracked' => 0,
-            ],
-            'today' => [
-                'date' => github_statistics_today_key(),
-                'profileViews' => 0,
-                'searches' => 0,
-            ],
-            'popularProfiles' => [],
-            'popularSearches' => [],
-            'leaderboards' => [
-                'profiles' => [],
-                'searches' => [],
-            ],
-        ]);
-    });
+    $summary = github_statistics_read_json('summary.json', static fn (): array => []);
 
     if (!isset($summary['totals']) || !is_array($summary['totals'])) {
-        github_statistics_refresh_derived_files();
-        return github_read_statistics_summary();
+        return github_build_statistics_summary(github_build_statistics_leaderboards());
     }
 
     return $summary;
@@ -1185,6 +1137,8 @@ function github_read_statistics_summary(): array
 
 function github_handle_statistics_event(array $payload): array
 {
+    github_statistics_reset_request_state();
+
     $event = strtolower(trim((string) ($payload['event'] ?? $payload['action'] ?? 'profile_view')));
 
     if ($event === 'search' || $event === 'search_query') {
@@ -1196,7 +1150,7 @@ function github_handle_statistics_event(array $payload): array
         return [
             'event' => 'search',
             'search' => $search,
-            'publish' => github_statistics_sync_to_repository('search', [
+            'publish' => github_statistics_flush_to_repository('search', [
                 'query' => (string) ($search['query'] ?? ''),
             ]),
         ];
@@ -1213,7 +1167,7 @@ function github_handle_statistics_event(array $payload): array
     return [
         'event' => 'profile_view',
         'profile' => $profile,
-        'publish' => github_statistics_sync_to_repository('profile view', [
+        'publish' => github_statistics_flush_to_repository('profile view', [
             'kind' => $kind,
             'person_id' => $personId,
         ]),

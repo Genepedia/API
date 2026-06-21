@@ -63,12 +63,16 @@
    `LOCAL_LOGIN_USERNAME` plus `LOCAL_LOGIN_PASSWORD` (or `LOCAL_LOGIN_PASSWORD_HASH`).
    Leave `LOCAL_LOGIN_USERNAME` blank to disable that form (GitHub login still works).
 
-   Statistics (`profile-views.json`, search queries, daily rollups) are written
-   automatically to `data/Genepedia-Database/statistics` inside the Genepedia
-   site checkout and committed to the `Genepedia` repository. Signed-in users
-   commit as themselves; anonymous views and searches commit as the GitHub App
-   bot. Set `GITHUB_STATISTICS_SYNC=0` to disable GitHub commits during local
-   development.
+   Statistics are stored only in the `Genepedia/Genepedia` GitHub repository at
+   `data/Genepedia-Database/statistics/`. The API server has no local statistics
+   files — every read goes through the GitHub Contents API and every write commits
+   back to the default branch. Signed-in users commit as themselves; anonymous
+   traffic commits as the GitHub App bot.
+
+   The GitHub App must have **Contents: Read and write** on `Genepedia/Genepedia`
+   (`publish_auth.can_publish` must be true in `github-config.php`). Without write
+   access, statistics recording will fail. Set `GITHUB_STATISTICS_SYNC=0` only if
+   you need to disable all statistics writes entirely.
 
    Double-check the two IDs are not swapped:
    - `GITHUB_APP_ID` = numeric **App ID**

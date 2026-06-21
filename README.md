@@ -20,7 +20,7 @@ Shared API between Genepedia projects.
 - `github-pull-requests.php` — lists open page-editor pull requests and returns file diffs for a selected PR
 - `github-pull-request-review.php` — approves (merge) or declines (close) a pull request; restricted to `GITHUB_REVIEW_LOGIN`
 - `github-contact.php` — creates a GitHub issue from the public contact form using the GitHub App installation token or PAT (no GitHub sign-in required)
-- `github-statistics.php` — unified statistics API: records profile views (people and pets) and search queries; commits statistics to GitHub as the signed-in user or the GitHub App for anonymous traffic; returns popular profiles/searches for rolling windows (`24h`, `3d`, `7d`, `30d`, `60d`, `90d`, `6m`, `1y`, `all`) plus generated `summary.json` / `leaderboards.json`
+- `github-statistics.php` — unified statistics API: reads and writes statistics exclusively via the `Genepedia/Genepedia` GitHub repo (`data/Genepedia-Database/statistics/`); records profile views (people and pets) and search queries; commits as the signed-in user or the GitHub App for anonymous traffic; returns popular profiles/searches for rolling windows (`24h`, `3d`, `7d`, `30d`, `60d`, `90d`, `6m`, `1y`, `all`) plus generated `summary.json` / `leaderboards.json`
 - `github-profile-views.php` — backward-compatible wrapper for profile view recording and popular profiles (prefer `github-statistics.php` for new integrations)
 - `location-search.php` — public place-search proxy used by structured location fields in the profile editor
 

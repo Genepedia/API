@@ -1836,7 +1836,7 @@ function github_fetch_file_contents_at_ref(string $owner, string $repo, string $
         'https://api.github.com/repos/%s/%s/contents/%s?ref=%s',
         rawurlencode($owner),
         rawurlencode($repo),
-        rawurlencode($path),
+        github_encode_repo_path($path),
         rawurlencode($ref)
     );
 
