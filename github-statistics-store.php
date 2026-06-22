@@ -68,6 +68,231 @@ function github_statistics_reset_request_state(): void
     $state['writeTransaction'] = true;
 }
 
+/**
+ * How often buffered counts are pushed to the database repository.
+ * Override with the GITHUB_STATISTICS_FLUSH_INTERVAL environment variable (seconds).
+ */
+const GITHUB_STATISTICS_FLUSH_INTERVAL_SECONDS = 3600;
+
+function github_statistics_flush_interval_seconds(): int
+{
+    $configured = (int) trim(github_env_value('GITHUB_STATISTICS_FLUSH_INTERVAL'));
+    if ($configured > 0) {
+        return $configured;
+    }
+
+    return GITHUB_STATISTICS_FLUSH_INTERVAL_SECONDS;
+}
+
+function github_statistics_ensure_writable_dir(string $dir): bool
+{
+    if ($dir === '') {
+        return false;
+    }
+
+    if (is_dir($dir)) {
+        return is_writable($dir);
+    }
+
+    if (@mkdir($dir, 0775, true) || is_dir($dir)) {
+        return is_writable($dir);
+    }
+
+    return false;
+}
+
+/**
+ * Resolve the local file used to buffer statistics between repository pushes.
+ * Prefers a gitignored `.cache` folder next to the API, with sensible fallbacks
+ * so the API keeps working on hosts where the deployment directory is read-only.
+ */
+function github_statistics_buffer_path(): string
+{
+    static $resolved = null;
+    if (is_string($resolved)) {
+        return $resolved;
+    }
+
+    $configured = trim(github_env_value('GITHUB_STATISTICS_BUFFER_PATH'));
+    if ($configured !== '' && github_statistics_ensure_writable_dir(dirname($configured))) {
+        return $resolved = $configured;
+    }
+
+    $localDir = __DIR__ . '/.cache';
+    if (github_statistics_ensure_writable_dir($localDir)) {
+        return $resolved = $localDir . '/statistics-buffer.json';
+    }
+
+    $tempDir = rtrim(str_replace('\\', '/', sys_get_temp_dir()), '/') . '/genepedia-statistics';
+    github_statistics_ensure_writable_dir($tempDir);
+
+    return $resolved = $tempDir . '/statistics-buffer.json';
+}
+
+function github_statistics_default_buffer(): array
+{
+    return [
+        'schema' => 'genepedia/statistics/buffer@1',
+        'files' => [],
+        'meta' => [
+            'lastFlushedAt' => null,
+            'pendingSince' => null,
+        ],
+    ];
+}
+
+function github_statistics_normalize_buffer(mixed $raw): array
+{
+    if (!is_array($raw)) {
+        return github_statistics_default_buffer();
+    }
+
+    $files = is_array($raw['files'] ?? null) ? $raw['files'] : [];
+    $meta = is_array($raw['meta'] ?? null) ? $raw['meta'] : [];
+
+    return [
+        'schema' => (string) ($raw['schema'] ?? 'genepedia/statistics/buffer@1'),
+        'files' => $files,
+        'meta' => [
+            'lastFlushedAt' => $meta['lastFlushedAt'] ?? null,
+            'pendingSince' => $meta['pendingSince'] ?? null,
+        ],
+    ];
+}
+
+function github_statistics_buffer_read_from_disk(): array
+{
+    $path = github_statistics_buffer_path();
+    if (!is_file($path)) {
+        return github_statistics_default_buffer();
+    }
+
+    $raw = @file_get_contents($path);
+    if (!is_string($raw) || $raw === '') {
+        return github_statistics_default_buffer();
+    }
+
+    return github_statistics_normalize_buffer(json_decode($raw, true));
+}
+
+function &github_statistics_buffer_state(): array
+{
+    static $state = [
+        'loaded' => false,
+        'mtime' => null,
+        'data' => null,
+    ];
+
+    return $state;
+}
+
+/**
+ * Return the in-process copy of the local statistics buffer, transparently
+ * reloading it from disk when the file changes (PHP-FPM reuses workers across
+ * requests, so a static alone would go stale).
+ */
+function github_statistics_buffer(bool $forceReload = false): array
+{
+    $state = &github_statistics_buffer_state();
+    $path = github_statistics_buffer_path();
+    $mtime = is_file($path) ? @filemtime($path) : 0;
+
+    if ($forceReload || !$state['loaded'] || $state['mtime'] !== $mtime) {
+        $state['data'] = github_statistics_buffer_read_from_disk();
+        $state['mtime'] = $mtime;
+        $state['loaded'] = true;
+    }
+
+    return $state['data'];
+}
+
+function github_statistics_buffer_write_to_disk(array $buffer): bool
+{
+    $path = github_statistics_buffer_path();
+    if (!github_statistics_ensure_writable_dir(dirname($path))) {
+        return false;
+    }
+
+    $payload = json_encode($buffer, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (!is_string($payload)) {
+        return false;
+    }
+    $payload .= "\n";
+
+    $tempPath = $path . '.tmp-' . bin2hex(random_bytes(6));
+    if (@file_put_contents($tempPath, $payload, LOCK_EX) === false) {
+        return false;
+    }
+
+    if (!@rename($tempPath, $path)) {
+        @unlink($tempPath);
+        return false;
+    }
+
+    $state = &github_statistics_buffer_state();
+    $state['data'] = $buffer;
+    $state['loaded'] = true;
+    $state['mtime'] = @filemtime($path) ?: time();
+
+    return true;
+}
+
+function github_statistics_lock_path(): string
+{
+    return github_statistics_buffer_path() . '.lock';
+}
+
+function &github_statistics_lock_state(): array
+{
+    static $state = ['handle' => null];
+
+    return $state;
+}
+
+/**
+ * Take an exclusive cross-process lock for the duration of a statistics
+ * mutation so concurrent requests cannot lose increments. Best effort: when a
+ * lock cannot be acquired we still proceed (atomic temp+rename keeps the file
+ * consistent), accepting a rare lost count over a hard failure.
+ */
+function github_statistics_acquire_lock(): bool
+{
+    $state = &github_statistics_lock_state();
+    if (is_resource($state['handle'])) {
+        return true;
+    }
+
+    $path = github_statistics_lock_path();
+    if (!github_statistics_ensure_writable_dir(dirname($path))) {
+        return false;
+    }
+
+    $handle = @fopen($path, 'c');
+    if (!is_resource($handle)) {
+        return false;
+    }
+
+    if (!@flock($handle, LOCK_EX)) {
+        @fclose($handle);
+        return false;
+    }
+
+    $state['handle'] = $handle;
+
+    return true;
+}
+
+function github_statistics_release_lock(): void
+{
+    $state = &github_statistics_lock_state();
+    if (is_resource($state['handle'])) {
+        @flock($state['handle'], LOCK_UN);
+        @fclose($state['handle']);
+    }
+
+    $state['handle'] = null;
+}
+
 function github_statistics_validate_filename(string $filename): string
 {
     $clean = ltrim(str_replace('\\', '/', trim($filename)), '/');
@@ -99,6 +324,17 @@ function github_statistics_read_json(string $filename, callable|string $defaultF
 
     if ($state['writeTransaction'] && isset($state['memory'][$filename])) {
         return $state['memory'][$filename];
+    }
+
+    // Serve from the local buffer when available so routine reads never hit the
+    // GitHub API and always reflect the freshest (not-yet-pushed) counts.
+    $buffer = github_statistics_buffer();
+    if (isset($buffer['files'][$filename]) && is_array($buffer['files'][$filename])) {
+        $data = $buffer['files'][$filename];
+        if ($state['writeTransaction']) {
+            $state['memory'][$filename] = $data;
+        }
+        return $data;
     }
 
     $context = github_statistics_repo_context();
@@ -156,17 +392,18 @@ function github_statistics_encode_json_file(array $data): string
 
 function github_statistics_build_commit_files(): array
 {
-    $state = github_statistics_request_state();
+    $buffer = github_statistics_buffer();
     $files = [];
 
     foreach (github_statistics_publish_filenames() as $filename) {
-        if (!($state['dirty'][$filename] ?? false) || !isset($state['memory'][$filename])) {
+        $data = $buffer['files'][$filename] ?? null;
+        if (!is_array($data)) {
             continue;
         }
 
         $files[] = [
             'path' => github_statistics_workspace_relative_path($filename),
-            'content' => github_statistics_encode_json_file($state['memory'][$filename]),
+            'content' => github_statistics_encode_json_file($data),
         ];
     }
 
@@ -893,6 +1130,116 @@ function github_statistics_flush_to_repository(string $event, array $context = [
     throw new RuntimeException($lastError?->getMessage() ?? 'Could not commit statistics to GitHub.');
 }
 
+/**
+ * Persist the current request's mutations into the local buffer and only push
+ * to the database repository when the flush interval has elapsed (or when
+ * forced by the scheduled flush endpoint). This is what keeps GitHub API usage
+ * low: hundreds of views/searches collapse into one hourly commit instead of a
+ * commit per event. The data is always safe locally first, so a failed or
+ * deferred push never loses counts.
+ */
+function github_statistics_persist_and_maybe_flush(string $event = 'periodic sync', array $context = [], bool $force = false): array
+{
+    $state = github_statistics_request_state();
+    $buffer = github_statistics_buffer();
+
+    // Fold this request's in-memory changes into the buffer.
+    foreach ($state['memory'] as $filename => $data) {
+        if (is_array($data)) {
+            $buffer['files'][$filename] = $data;
+        }
+    }
+
+    $now = time();
+    $hasDirty = ($state['dirty'] ?? []) !== [];
+    if ($hasDirty && empty($buffer['meta']['pendingSince'])) {
+        $buffer['meta']['pendingSince'] = github_statistics_now();
+    }
+
+    // Always persist locally first (cheap, no GitHub API call).
+    $persisted = github_statistics_buffer_write_to_disk($buffer);
+
+    $pendingSince = $buffer['meta']['pendingSince'] ?? null;
+    if ($pendingSince === null) {
+        return [
+            'synced' => false,
+            'buffered' => $persisted,
+            'pending' => false,
+            'storage' => 'local',
+        ];
+    }
+
+    if (trim(github_env_value('GITHUB_STATISTICS_SYNC')) === '0') {
+        return [
+            'synced' => false,
+            'buffered' => $persisted,
+            'pending' => true,
+            'skipped' => 'sync_disabled',
+            'storage' => 'local',
+        ];
+    }
+
+    $lastFlushedAt = $buffer['meta']['lastFlushedAt'] ?? null;
+    $lastFlushedTs = is_string($lastFlushedAt) && $lastFlushedAt !== '' ? (int) strtotime($lastFlushedAt) : 0;
+    $intervalSeconds = github_statistics_flush_interval_seconds();
+    $intervalElapsed = $lastFlushedTs <= 0 || ($now - $lastFlushedTs) >= $intervalSeconds;
+
+    if (!$force && !$intervalElapsed) {
+        return [
+            'synced' => false,
+            'buffered' => $persisted,
+            'pending' => true,
+            'pending_since' => $pendingSince,
+            'next_flush_at' => $lastFlushedTs > 0 ? gmdate('c', $lastFlushedTs + $intervalSeconds) : null,
+            'storage' => 'local',
+        ];
+    }
+
+    try {
+        $result = github_statistics_flush_to_repository($event, $context);
+    } catch (Throwable $error) {
+        // Keep the data buffered and retry on the next event or scheduled flush.
+        return [
+            'synced' => false,
+            'buffered' => $persisted,
+            'pending' => true,
+            'flush_error' => $error->getMessage(),
+            'pending_since' => $pendingSince,
+            'storage' => 'local',
+        ];
+    }
+
+    $synced = ($result['synced'] ?? false) === true;
+    $noChanges = ($result['skipped'] ?? '') === 'no_changes';
+    if ($synced || $noChanges) {
+        if ($synced) {
+            $buffer['meta']['lastFlushedAt'] = github_statistics_now();
+        }
+        $buffer['meta']['pendingSince'] = null;
+        github_statistics_buffer_write_to_disk($buffer);
+    }
+
+    return $result + ['buffered' => $persisted, 'storage' => 'local'];
+}
+
+/**
+ * Force any pending buffered counts to be pushed now. Intended for an hourly
+ * cron/scheduled task so the final batch of events is never left unsynced. No-op
+ * when nothing is pending.
+ */
+function github_statistics_force_flush(): array
+{
+    github_statistics_reset_request_state();
+    github_statistics_acquire_lock();
+    github_statistics_buffer(true);
+
+    try {
+        return github_statistics_persist_and_maybe_flush('periodic sync', [], true);
+    } finally {
+        github_statistics_release_lock();
+    }
+}
+
 function github_increment_profile_view(string $kind, string $personId): array
 {
     $now = github_statistics_now();
@@ -1138,38 +1485,41 @@ function github_read_statistics_summary(): array
 function github_handle_statistics_event(array $payload): array
 {
     github_statistics_reset_request_state();
+    github_statistics_acquire_lock();
+    // Reload the buffer under the lock so concurrent requests build on the
+    // latest state instead of a stale per-worker copy.
+    github_statistics_buffer(true);
 
-    $event = strtolower(trim((string) ($payload['event'] ?? $payload['action'] ?? 'profile_view')));
+    try {
+        $event = strtolower(trim((string) ($payload['event'] ?? $payload['action'] ?? 'profile_view')));
 
-    if ($event === 'search' || $event === 'search_query') {
-        $search = github_record_search_query(
-            (string) ($payload['query'] ?? $payload['q'] ?? ''),
-            max(0, (int) ($payload['result_count'] ?? $payload['results'] ?? 0)),
-        );
+        if ($event === 'search' || $event === 'search_query') {
+            $search = github_record_search_query(
+                (string) ($payload['query'] ?? $payload['q'] ?? ''),
+                max(0, (int) ($payload['result_count'] ?? $payload['results'] ?? 0)),
+            );
+
+            return [
+                'event' => 'search',
+                'search' => $search,
+                'publish' => github_statistics_persist_and_maybe_flush(),
+            ];
+        }
+
+        $personId = github_validate_person_id((string) ($payload['person_id'] ?? $payload['person'] ?? ''));
+        if ($personId === null) {
+            throw new InvalidArgumentException('A valid profile id is required.');
+        }
+
+        $kind = github_normalize_profile_kind((string) ($payload['kind'] ?? 'person'));
+        $profile = github_increment_profile_view($kind, $personId);
 
         return [
-            'event' => 'search',
-            'search' => $search,
-            'publish' => github_statistics_flush_to_repository('search', [
-                'query' => (string) ($search['query'] ?? ''),
-            ]),
+            'event' => 'profile_view',
+            'profile' => $profile,
+            'publish' => github_statistics_persist_and_maybe_flush(),
         ];
+    } finally {
+        github_statistics_release_lock();
     }
-
-    $personId = github_validate_person_id((string) ($payload['person_id'] ?? $payload['person'] ?? ''));
-    if ($personId === null) {
-        throw new InvalidArgumentException('A valid profile id is required.');
-    }
-
-    $kind = github_normalize_profile_kind((string) ($payload['kind'] ?? 'person'));
-    $profile = github_increment_profile_view($kind, $personId);
-
-    return [
-        'event' => 'profile_view',
-        'profile' => $profile,
-        'publish' => github_statistics_flush_to_repository('profile view', [
-            'kind' => $kind,
-            'person_id' => $personId,
-        ]),
-    ];
 }

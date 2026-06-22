@@ -1,3 +1,6 @@
 .env
 *.pem
 github-app-private-key.pem
+
+# Local statistics buffer (Page/Search counts batched before the hourly push)
+.cache/
