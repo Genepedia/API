@@ -467,6 +467,10 @@ function callbackUrl(env) {
   return String(env.GITHUB_CALLBACK_URL || "https://api.genepedia.org/genepedia/github-callback.php").trim();
 }
 
+function isGitHubAppClientId(value) {
+  return /^Iv(?:1\.|23)/.test(String(value || "").trim());
+}
+
 async function storeOneTime(env, table, keyName, key, payload, ttlSeconds) {
   const encrypted = await encryptJson(env, payload);
   const expiresAt = nowSeconds() + ttlSeconds;
@@ -590,10 +594,10 @@ async function githubConfig(request, env, site) {
     ok: true,
     oauth_configured: configured,
     oauth: {
-      uses_github_app_flow: String(env.GITHUB_CLIENT_ID || "").startsWith("Iv1."),
+      uses_github_app_flow: isGitHubAppClientId(env.GITHUB_CLIENT_ID),
       callback_url: callback,
       client_id_set: Boolean(env.GITHUB_CLIENT_ID),
-      client_id_is_github_app_format: String(env.GITHUB_CLIENT_ID || "").startsWith("Iv1."),
+      client_id_is_github_app_format: isGitHubAppClientId(env.GITHUB_CLIENT_ID),
     },
     github_app: { configured: hasApp, private_key_readable: hasApp },
     api_auth: { configured: hasApp || hasPat || Boolean(env.GITHUB_PUBLISH_TOKEN), method: hasApp ? "github_app" : hasPat ? "personal_access_token" : null },

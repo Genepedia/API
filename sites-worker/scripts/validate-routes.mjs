@@ -227,6 +227,15 @@ try {
   assert.equal(configBody.oauth_configured, false);
   assert.equal(JSON.stringify(configBody).includes("client_secret"), false, "public config must not expose secret material");
 
+  const modernAppConfig = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-config.php"), {
+    GITHUB_CLIENT_ID: "Iv23ExampleClientId",
+    GITHUB_CLIENT_SECRET: "validation-only-secret",
+  });
+  const modernAppBody = await modernAppConfig.json();
+  assert.equal(modernAppBody.oauth_configured, true);
+  assert.equal(modernAppBody.oauth.uses_github_app_flow, true, "GitHub's current Iv23 client ID format must be recognized");
+  assert.equal(modernAppBody.oauth.client_id_is_github_app_format, true);
+
   const preflight = await worker.fetch(new Request("https://api.genepedia.org/gravepedia/memorials.php", {
     method: "OPTIONS",
     headers: { Origin: "https://www.gravepedia.org", "Access-Control-Request-Method": "POST" },
