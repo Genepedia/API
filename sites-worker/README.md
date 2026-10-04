@@ -53,6 +53,13 @@ the Sites secret manager, never in this source tree or in the hosting manifest.
 | `GITHUB_STATISTICS_SYNC` | Optional; set to `0` to retain events in D1 without publishing them to GitHub |
 | `GITHUB_ALLOWED_CORS_ORIGINS` | Optional comma-separated exact origins for hosted Site URLs or additional frontends |
 | `GITHUB_ALLOWED_RETURN_ORIGINS` | Optional comma-separated exact HTTPS origins allowed for OAuth return URLs |
+| `GITHUB_WELCOME_ACTIONS` | Optional; set to `0`, `false`, `no`, or `off` to disable welcome stars and follows; enabled by default |
+| `GITHUB_WELCOME_STAR_REPOS` | Optional comma-separated `owner/repository` list to star after GitHub OAuth sign-in |
+| `GITHUB_WELCOME_FOLLOW_USERS` | Optional comma-separated GitHub user or organization logins to follow after GitHub OAuth sign-in |
+| `LOCAL_LOGIN_USERNAME` | Optional local sign-in username; leave blank to disable local login |
+| `LOCAL_LOGIN_PASSWORD` | Optional local password secret; required with the username unless a supported password hash is configured |
+| `LOCAL_LOGIN_PASSWORD_HASH` | Optional Worker PBKDF2 hash; takes precedence over `LOCAL_LOGIN_PASSWORD` |
+| `LOCAL_LOGIN_DISPLAY_NAME` | Optional display name for the local signed-in identity |
 
 GitHub App credentials are preferred for writes. The App must be installed with
 the required permissions on the repositories it serves. Minimum installation
@@ -83,11 +90,27 @@ three minutes. Session and handoff payloads are encrypted in D1; the browser
 gets the short-lived GitHub access token from the existing handoff endpoint so
 the current frontend can retain its bearer-token flow.
 
+Local login uses the same one-time D1 handoff and encrypted HttpOnly session
+cookie, but its response has `auth_type: "local"` and no GitHub access token.
+The shared frontend must redeem the handoff with cookies enabled and must not
+store or send a bearer token for local sessions. Local sessions can browse as
+signed-in users; GitHub write, merge, decline, and moderation routes require a
+GitHub-authenticated session and never use server publish credentials for a
+local identity.
+
+`LOCAL_LOGIN_PASSWORD_HASH` accepts
+`pbkdf2-sha256$iterations$salt-base64url$digest-base64url`, with 100,000 to
+1,000,000 PBKDF2-SHA-256 iterations, a 16 to 64 byte salt, and a 16 to 64 byte
+derived digest. The Worker uses the hash when present; otherwise it compares
+`LOCAL_LOGIN_PASSWORD` in constant time. PHP bcrypt strings such as `$2y$...`
+are not a Worker-supported hash format, so use the password secret or configure
+a PBKDF2 hash in the Sites secret manager.
+
 ## Supported routes
 
 Routes keep their `.php` suffix where the existing frontend expects it.
 
-- Authentication: `github-config.php`, `github-login.php`,
+- Authentication: `github-config.php`, `github-login.php`, `local-login.php`,
   `github-callback.php`, `github-session.php`, `github-logout.php`, and
   `github-handoff.php`.
 - Public reads: `data.php?path=...`, `media.php?path=...`,
@@ -123,16 +146,21 @@ Routes keep their `.php` suffix where the existing frontend expects it.
   and opens a pending-review memorial submission PR.
 - `__capabilities` returns the Worker-supported and unimplemented route list.
 
+GitHub OAuth success best-effort stars and follows configured welcome targets.
+Each target is handled independently and failures do not prevent sign-in.
+Stars use idempotent GitHub REST `PUT` requests. User follows check current
+state before following; organization follows use the GitHub GraphQL mutation
+with REST fallbacks. Local sign-in does not trigger GitHub mutations.
+
 For Genepedia database reads, `data.php?path=people/...` is routed to the
 database repository. The historical workspace prefix
 `data/Genepedia-Database/` is also accepted and removed before the GitHub read.
 For Gravepedia, `data.php` accepts only `data/memorials/...` paths.
 
-## PHP endpoints not implemented
+## PHP endpoint not implemented
 
-Only these legacy PHP endpoints remain unsupported in public hosting:
+This legacy PHP endpoint remains unsupported in public hosting:
 
-- `local-login.php` — local username/password sign-in.
 - `check_writable_tmp.php` — PHP-host-only writable temporary directory check.
 
 Media management checks the profile ownership record in

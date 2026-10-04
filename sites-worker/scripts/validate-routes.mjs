@@ -29,11 +29,51 @@ let fallbackWrites = 0;
 let failDatabasePullRequestCreation = false;
 let rolledBackPullRequests = 0;
 let rolledBackSiteBranches = 0;
+let welcomeStarPuts = 0;
+let welcomeUserFollowPuts = 0;
+let welcomeOrganizationFollowMutations = 0;
+let welcomeUserIsFollowed = false;
+let welcomeOrganizationIsFollowed = false;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url);
-  assert.equal(url.hostname, "api.github.com", "route test should only fetch the mocked GitHub API");
   const method = init.method || input?.method || "GET";
   const authorization = init.headers?.Authorization || input?.headers?.get?.("Authorization") || "";
+  if (url.hostname === "github.com" && url.pathname === "/login/oauth/access_token") {
+    return new Response(JSON.stringify({ access_token: "test-user-token" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  assert.equal(url.hostname, "api.github.com", "route test should only fetch the mocked GitHub API");
+  if (url.pathname === "/user/starred/Genepedia/Genepedia" && method === "PUT") {
+    welcomeStarPuts += 1;
+    return new Response(null, { status: 204 });
+  }
+  if (url.pathname === "/users/followed-user" && method === "GET") {
+    return new Response(JSON.stringify({ login: "followed-user", type: "User" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/user/following/followed-user") {
+    if (method === "PUT") {
+      welcomeUserFollowPuts += 1;
+      welcomeUserIsFollowed = true;
+      return new Response(null, { status: 204 });
+    }
+    return welcomeUserIsFollowed ? new Response(null, { status: 204 }) : new Response(null, { status: 404 });
+  }
+  if (url.pathname === "/users/Genepedia" && method === "GET") {
+    return new Response(JSON.stringify({ login: "Genepedia", type: "Organization" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/user/following/Genepedia") {
+    return new Response(null, { status: 404 });
+  }
+  if (url.pathname === "/graphql" && method === "POST") {
+    const query = String(JSON.parse(init.body || "{}").query || "");
+    if (query.includes("OrganizationFollowState")) {
+      return new Response(JSON.stringify({ data: { organization: { id: "org-id", login: "Genepedia", viewerIsFollowing: welcomeOrganizationIsFollowed } } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (query.includes("FollowOrganization")) {
+      welcomeOrganizationFollowMutations += 1;
+      welcomeOrganizationIsFollowed = true;
+      return new Response(JSON.stringify({ data: { followOrganization: { organization: { login: "Genepedia", viewerIsFollowing: true } } } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+  }
   if (url.pathname === "/user") {
     return new Response(JSON.stringify({ id: 41, login: "test-user", name: "Test User", avatar_url: "https://avatars.example/test", html_url: "https://github.com/test-user" }), {
       status: 200,
@@ -169,6 +209,8 @@ class MemoryD1 {
   events = [];
   meta = new Map();
   locks = new Map();
+  sessions = new Map();
+  oneTime = new Map([["oauth_states", new Map()], ["oauth_handoffs", new Map()]]);
 
   prepare(sql) {
     const statement = {
@@ -176,6 +218,19 @@ class MemoryD1 {
       values: [],
       bind: (...values) => { statement.values = values; return statement; },
       first: async () => {
+        if (sql.startsWith("SELECT payload, expires_at FROM worker_sessions WHERE session_id_hash = ?1")) {
+          return this.sessions.get(statement.values[0]) || null;
+        }
+        const consumeMatch = sql.match(/^DELETE FROM (oauth_states|oauth_handoffs) WHERE (state_hash|handoff_hash) = \?1 AND expires_at > \?2 RETURNING payload$/);
+        if (consumeMatch) {
+          const [table, keyName] = consumeMatch.slice(1);
+          const [key, now] = statement.values;
+          const rows = this.oneTime.get(table);
+          const row = rows.get(key);
+          if (!row || row.expires_at <= now) return null;
+          rows.delete(key);
+          return { payload: row.payload };
+        }
         if (sql.startsWith("INSERT INTO statistics_events") && sql.includes("SELECT ?1")) {
           const [event_id, payload, created_at, cap] = statement.values;
           if (this.events.length >= Number(cap)) return null;
@@ -195,7 +250,23 @@ class MemoryD1 {
       },
       all: async () => ({ results: this.events.slice(0, Number(statement.values[0]) || 500) }),
       run: async () => {
-        if (sql.startsWith("INSERT INTO statistics_events")) {
+        if (sql.startsWith("INSERT INTO worker_sessions")) {
+          const [session_id_hash, payload, expires_at] = statement.values;
+          this.sessions.set(session_id_hash, { payload, expires_at });
+        } else if (sql.startsWith("DELETE FROM worker_sessions WHERE session_id_hash = ?1")) {
+          this.sessions.delete(statement.values[0]);
+        } else if (sql.startsWith("DELETE FROM worker_sessions WHERE expires_at <= ?1")) {
+          const now = statement.values[0];
+          for (const [key, row] of this.sessions) if (row.expires_at <= now) this.sessions.delete(key);
+        } else if (sql.startsWith("INSERT INTO oauth_states") || sql.startsWith("INSERT INTO oauth_handoffs")) {
+          const table = sql.startsWith("INSERT INTO oauth_states") ? "oauth_states" : "oauth_handoffs";
+          const [key, payload, expires_at] = statement.values;
+          this.oneTime.get(table).set(key, { payload, expires_at });
+        } else if (sql.startsWith("DELETE FROM oauth_states WHERE expires_at <= ?1") || sql.startsWith("DELETE FROM oauth_handoffs WHERE expires_at <= ?1")) {
+          const table = sql.startsWith("DELETE FROM oauth_states") ? "oauth_states" : "oauth_handoffs";
+          const now = statement.values[0];
+          for (const [key, row] of this.oneTime.get(table)) if (row.expires_at <= now) this.oneTime.get(table).delete(key);
+        } else if (sql.startsWith("INSERT INTO statistics_events")) {
           const [event_id, payload, created_at] = statement.values;
           this.events.push({ event_id, payload, created_at });
         } else if (sql.startsWith("DELETE FROM statistics_events WHERE event_id IN")) {
@@ -225,7 +296,153 @@ try {
   const configBody = await config.json();
   assert.equal(configBody.repo, "Genepedia/Genepedia");
   assert.equal(configBody.oauth_configured, false);
+  assert.equal(configBody.local_login_configured, false, "local login is disabled unless both username and a password are configured");
   assert.equal(JSON.stringify(configBody).includes("client_secret"), false, "public config must not expose secret material");
+
+  const localLoginEnv = {
+    DB: new MemoryD1(),
+    GITHUB_SESSION_SECRET: "test-session-secret-that-is-not-a-real-secret",
+    GITHUB_PUBLISH_TOKEN: "validation-only-token",
+    GITHUB_REVIEW_LOGIN: "local-reviewer",
+    LOCAL_LOGIN_USERNAME: "local-reviewer",
+    LOCAL_LOGIN_PASSWORD: "correct local password",
+    LOCAL_LOGIN_DISPLAY_NAME: "Local Reviewer",
+  };
+  const localConfigResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-config.php"), localLoginEnv);
+  assert.equal((await localConfigResponse.json()).local_login_configured, true);
+
+  const invalidLocalLogin = await worker.fetch(new Request("https://api.genepedia.org/genepedia/local-login.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "local-reviewer", password: "wrong password" }),
+  }), localLoginEnv);
+  assert.equal(invalidLocalLogin.status, 401);
+  assert.equal((await invalidLocalLogin.json()).error, "invalid_credentials");
+
+  const localLoginResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/local-login.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "local-reviewer", password: "correct local password" }),
+  }), localLoginEnv);
+  assert.equal(localLoginResponse.status, 200);
+  const localLoginBody = await localLoginResponse.json();
+  assert.equal(localLoginBody.auth_type, "local");
+  assert.match(localLoginBody.handoff, /^[a-f0-9]{64}$/);
+  assert.equal(Object.hasOwn(localLoginBody, "access_token"), false, "local login must not issue a bearer token");
+
+  const localHandoffResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-handoff.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: localLoginBody.handoff }),
+  }), localLoginEnv);
+  assert.equal(localHandoffResponse.status, 200);
+  const localHandoffBody = await localHandoffResponse.json();
+  assert.equal(localHandoffBody.auth_type, "local");
+  assert.equal(localHandoffBody.user.id, "local:local-reviewer");
+  assert.equal(Object.hasOwn(localHandoffBody, "access_token"), false, "local handoff must not return a GitHub bearer");
+  const localCookie = String(localHandoffResponse.headers.get("Set-Cookie") || "").split(";")[0];
+  assert.match(localCookie, /^__Host-genepedia_session=/);
+
+  const localSessionResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-session.php", {
+    headers: { Cookie: localCookie },
+  }), localLoginEnv);
+  const localSessionBody = await localSessionResponse.json();
+  assert.equal(localSessionBody.authenticated, true);
+  assert.equal(localSessionBody.auth_type, "local");
+  assert.equal(localSessionBody.can_review_pull_requests, false, "a local username must not inherit a matching GitHub reviewer login");
+
+  const localEditResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-submit-page-edit.php", {
+    method: "POST",
+    headers: { Cookie: localCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ path: "pages/about.html", content: "<main>Local edit</main>" }),
+  }), localLoginEnv);
+  assert.equal(localEditResponse.status, 401, "local sessions must not publish through server GitHub credentials");
+
+  const localReviewResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-pull-request-review.php", {
+    method: "POST",
+    headers: { Cookie: localCookie, "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "merge", number: 17, repo: "Genepedia/Genepedia" }),
+  }), localLoginEnv);
+  assert.equal(localReviewResponse.status, 401, "local sessions must not review or merge pull requests");
+  assert.equal(fallbackWrites, 0, "blocked local write and review actions must never use the server publish token");
+  const replayedLocalHandoff = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-handoff.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: localLoginBody.handoff }),
+  }), localLoginEnv);
+  assert.equal(replayedLocalHandoff.status, 401, "local handoff codes must remain single-use");
+
+  const hashSalt = new TextEncoder().encode("worker-test-salt");
+  const hashKey = await crypto.subtle.importKey("raw", new TextEncoder().encode("hashed local password"), "PBKDF2", false, ["deriveBits"]);
+  const hashDigest = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: hashSalt, iterations: 100_000 }, hashKey, 256);
+  const hashEnv = {
+    DB: new MemoryD1(),
+    GITHUB_SESSION_SECRET: localLoginEnv.GITHUB_SESSION_SECRET,
+    LOCAL_LOGIN_USERNAME: "hash-user",
+    LOCAL_LOGIN_PASSWORD_HASH: `pbkdf2-sha256$100000$${Buffer.from(hashSalt).toString("base64url")}$${Buffer.from(hashDigest).toString("base64url")}`,
+  };
+  const hashedLoginResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/local-login.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: "hash-user", password: "hashed local password" }),
+  }), hashEnv);
+  assert.equal(hashedLoginResponse.status, 200, "the documented PBKDF2 password hash format should authenticate");
+
+  async function runWelcomeOAuth(env) {
+    const start = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-login.php?return_to=https%3A%2F%2Fwww.genepedia.org%2Fpages%2Flogin.html"), env);
+    assert.equal(start.status, 302);
+    const state = new URL(start.headers.get("Location")).searchParams.get("state");
+    const csrfCookie = String(start.headers.get("Set-Cookie") || "").split(";")[0];
+    const callback = await worker.fetch(new Request(`https://api.genepedia.org/genepedia/github-callback.php?state=${encodeURIComponent(state)}&code=validation-code`, {
+      headers: { Cookie: csrfCookie },
+    }), env);
+    assert.equal(callback.status, 302);
+    const handoff = new URL(callback.headers.get("Location")).searchParams.get("github_handoff");
+    assert.ok(handoff);
+    return handoff;
+  }
+
+  const welcomeEnv = {
+    DB: new MemoryD1(),
+    GITHUB_SESSION_SECRET: localLoginEnv.GITHUB_SESSION_SECRET,
+    GITHUB_CLIENT_ID: "Iv23ValidationClientId",
+    GITHUB_CLIENT_SECRET: "validation-only-client-secret",
+    GITHUB_WELCOME_STAR_REPOS: "Genepedia/Genepedia,malformed,Genepedia/Genepedia/extra",
+    GITHUB_WELCOME_FOLLOW_USERS: "followed-user,Genepedia",
+  };
+  const githubHandoffCode = await runWelcomeOAuth(welcomeEnv);
+  assert.equal(welcomeStarPuts, 1);
+  assert.equal(welcomeUserFollowPuts, 1);
+  assert.equal(welcomeOrganizationFollowMutations, 1, "organization follows should use GraphQL after REST fallback is unavailable");
+  const githubHandoffResponse = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-handoff.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code: githubHandoffCode }),
+  }), welcomeEnv);
+  const githubHandoffBody = await githubHandoffResponse.json();
+  assert.equal(githubHandoffBody.auth_type, "github");
+  assert.equal(githubHandoffBody.access_token, "test-user-token", "the GitHub OAuth handoff should keep its bearer-token contract");
+  await runWelcomeOAuth(welcomeEnv);
+  assert.equal(welcomeUserFollowPuts, 1, "already-followed user accounts should not be followed a second time");
+  assert.equal(welcomeOrganizationFollowMutations, 1, "already-followed organizations should not be followed a second time");
+  const welcomeCountsBeforeDisable = [welcomeStarPuts, welcomeUserFollowPuts, welcomeOrganizationFollowMutations];
+  await runWelcomeOAuth({ ...welcomeEnv, GITHUB_WELCOME_ACTIONS: "off" });
+  assert.deepEqual([welcomeStarPuts, welcomeUserFollowPuts, welcomeOrganizationFollowMutations], welcomeCountsBeforeDisable, "the welcome action flag should disable all GitHub mutations");
+  const originalWarn = console.warn;
+  const welcomeWarnings = [];
+  console.warn = (...args) => welcomeWarnings.push(args.join(" "));
+  try {
+    await runWelcomeOAuth({
+      ...welcomeEnv,
+      DB: new MemoryD1(),
+      GITHUB_WELCOME_STAR_REPOS: "Genepedia/missing-repo,Genepedia/Genepedia",
+      GITHUB_WELCOME_FOLLOW_USERS: "missing-user,followed-user",
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assert.equal(welcomeWarnings.length, 2, "a failure for one welcome target should be logged without stopping other targets or OAuth");
+  assert.equal(welcomeStarPuts, welcomeCountsBeforeDisable[0] + 1, "a later star target should still run after a failed target");
 
   const modernAppConfig = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-config.php"), {
     GITHUB_CLIENT_ID: "Iv23ExampleClientId",
@@ -428,7 +645,9 @@ try {
 
   const capabilities = await worker.fetch(new Request("https://api.genepedia.org/genepedia/__capabilities"), env);
   const capabilitiesBody = await capabilities.json();
-  assert.deepEqual(capabilitiesBody.unimplemented.map((item) => item.split(" ")[0]), ["local-login.php", "check_writable_tmp.php"]);
+  assert.ok(capabilitiesBody.implemented.includes("GitHub and local login/session/handoff"));
+  assert.ok(capabilitiesBody.implemented.includes("best-effort GitHub OAuth welcome stars/follows"));
+  assert.deepEqual(capabilitiesBody.unimplemented.map((item) => item.split(" ")[0]), ["check_writable_tmp.php"]);
 
   console.log("Focused route validation passed");
 } finally {

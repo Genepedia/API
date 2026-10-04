@@ -399,7 +399,7 @@ async function sessionFromRequest(request, env) {
   if (bearer) {
     try {
       const user = await githubApi(env, "GET", "/user", { token: bearer });
-      return { user: normalizeUser(user.data), token: bearer, kind: "bearer" };
+      return { user: normalizeUser(user.data), token: bearer, kind: "bearer", authType: "github" };
     } catch {
       return null;
     }
@@ -415,22 +415,23 @@ async function sessionFromRequest(request, env) {
     return null;
   }
   const session = await decryptJson(env, row.payload);
-  if (!session?.user || !session?.token) return null;
-  return { user: session.user, token: session.token, sid, kind: "cookie" };
+  const authType = session?.authType === "local" ? "local" : "github";
+  if (!session?.user || (authType === "github" && !session?.token)) return null;
+  return { user: session.user, token: session.token || "", sid, kind: "cookie", authType };
 }
 
 async function requireUser(request, env) {
   const session = await sessionFromRequest(request, env);
-  if (!session?.user?.login || !session.token) {
+  if (session?.authType !== "github" || !session?.user?.login || !session.token) {
     throw new ApiError(401, "authentication_required", "Sign in with GitHub to continue.");
   }
   return session;
 }
 
-async function putSession(env, user, token) {
+async function putSession(env, user, token, authType = "github") {
   const sid = randomHex();
   const expiresAt = nowSeconds() + SESSION_TTL;
-  const payload = await encryptJson(env, { user, token });
+  const payload = await encryptJson(env, { user, token: token || "", authType: authType === "local" ? "local" : "github" });
   const database = await ensureStorage(env);
   await database.batch([
     database.prepare("DELETE FROM worker_sessions WHERE expires_at <= ?1").bind(nowSeconds()),
@@ -538,6 +539,218 @@ async function loginStart(request, env, site) {
   });
 }
 
+function localLoginConfigured(env) {
+  const username = String(env.LOCAL_LOGIN_USERNAME || "").trim();
+  const password = String(env.LOCAL_LOGIN_PASSWORD || "");
+  const passwordHash = String(env.LOCAL_LOGIN_PASSWORD_HASH || "").trim();
+  return Boolean(username && (passwordHash || password));
+}
+
+async function readLocalLoginPayload(request) {
+  const raw = await request.arrayBuffer();
+  if (raw.byteLength > 16_384) throw new ApiError(413, "body_too_large", "The request body is too large.");
+  const text = new TextDecoder().decode(raw);
+  const contentType = String(request.headers.get("Content-Type") || "").toLowerCase();
+  if (contentType.includes("application/x-www-form-urlencoded")) {
+    return Object.fromEntries(new URLSearchParams(text));
+  }
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("not an object");
+    return value;
+  } catch {
+    if (!contentType || contentType.includes("text/plain")) {
+      return Object.fromEntries(new URLSearchParams(text));
+    }
+    throw new ApiError(400, "invalid_json", "Request body must be a JSON object.");
+  }
+}
+
+async function verifyLocalPassword(password, env) {
+  const configuredHash = String(env.LOCAL_LOGIN_PASSWORD_HASH || "").trim();
+  if (!configuredHash) {
+    return constantTimeEqual(String(env.LOCAL_LOGIN_PASSWORD || ""), password);
+  }
+
+  // Web Crypto does not provide PHP's bcrypt password_verify format. Worker
+  // deployments may use this portable PBKDF2 format instead:
+  // pbkdf2-sha256$iterations$salt-base64url$digest-base64url
+  const parts = configuredHash.split("$");
+  if (parts.length !== 4 || parts[0] !== "pbkdf2-sha256") return false;
+  const iterations = Number(parts[1]);
+  if (!Number.isSafeInteger(iterations) || iterations < 100_000 || iterations > 1_000_000) return false;
+  try {
+    const salt = base64UrlDecode(parts[2]);
+    const expected = base64UrlDecode(parts[3]);
+    if (salt.length < 16 || salt.length > 64 || expected.length < 16 || expected.length > 64) return false;
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+    const derived = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, key, expected.length * 8);
+    return constantTimeEqual(base64UrlEncode(new Uint8Array(derived)), base64UrlEncode(expected));
+  } catch {
+    return false;
+  }
+}
+
+function localLoginUser(username, env) {
+  const displayName = String(env.LOCAL_LOGIN_DISPLAY_NAME || "").trim() || username;
+  const nameParts = displayName.split(/\s+/).filter(Boolean);
+  return {
+    id: `local:${username}`,
+    login: username,
+    displayName,
+    givenName: nameParts[0] || username,
+    familyName: nameParts.slice(1).join(" "),
+    photoUrl: "",
+    profileUrl: "",
+    email: "",
+  };
+}
+
+async function localLogin(request, env) {
+  if (request.method !== "POST") throw new ApiError(405, "method_not_allowed", "Only POST requests are supported.");
+  const payload = await readLocalLoginPayload(request);
+  const username = String(payload.username || "").trim();
+  const password = String(payload.password ?? "");
+  const expectedUsername = String(env.LOCAL_LOGIN_USERNAME || "").trim();
+  const configured = localLoginConfigured(env);
+  const passwordMatches = configured ? await verifyLocalPassword(password, env) : false;
+  const usernameMatches = configured && constantTimeEqual(expectedUsername, username);
+  if (!usernameMatches || !passwordMatches) {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    throw new ApiError(401, "invalid_credentials", "Invalid username or password.");
+  }
+
+  const user = localLoginUser(expectedUsername, env);
+  const handoffCode = randomHex();
+  await storeOneTime(env, "oauth_handoffs", "handoff_hash", handoffCode, { user, token: "", authType: "local" }, HANDOFF_TTL);
+  return jsonResponse(request, env, { ok: true, authenticated: true, auth_type: "local", handoff: handoffCode });
+}
+
+async function welcomeGitHubRequest(token, method, path, body = undefined) {
+  const headers = {
+    Accept: "application/vnd.github+json",
+    Authorization: `Bearer ${token}`,
+    "User-Agent": "Genepedia-Sites-API/1.0",
+    "X-GitHub-Api-Version": API_VERSION,
+  };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  const response = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers,
+    redirect: "manual",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = null; }
+  if (!response.ok && response.status !== 304 && response.status !== 404) {
+    throw new Error(String(data?.message || `GitHub returned HTTP ${response.status}.`));
+  }
+  return { status: response.status, data };
+}
+
+function welcomeList(env, name) {
+  return [...new Set(String(env[name] || "").split(",").map((item) => item.trim()).filter(Boolean))];
+}
+
+function welcomeActionsEnabled(env) {
+  return !["0", "false", "no", "off"].includes(String(env.GITHUB_WELCOME_ACTIONS || "").trim().toLowerCase());
+}
+
+async function welcomeStarRepository(owner, repo, token) {
+  const result = await welcomeGitHubRequest(token, "PUT", `/user/starred/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`);
+  if (![204, 304].includes(result.status)) throw new Error(`GitHub returned HTTP ${result.status} while starring the repository.`);
+}
+
+async function welcomeIsFollowing(login, token) {
+  const result = await welcomeGitHubRequest(token, "GET", `/user/following/${encodeURIComponent(login)}`);
+  if ([204, 304].includes(result.status)) return true;
+  if (result.status === 404) return false;
+  throw new Error(`GitHub returned HTTP ${result.status} while checking follow status.`);
+}
+
+async function welcomeFollowUser(login, token) {
+  if (await welcomeIsFollowing(login, token)) return;
+  const result = await welcomeGitHubRequest(token, "PUT", `/user/following/${encodeURIComponent(login)}`);
+  if (![204, 304].includes(result.status)) throw new Error(`GitHub returned HTTP ${result.status} while following the user.`);
+}
+
+async function welcomeOrganizationFollowState(login, token) {
+  const result = await welcomeGitHubRequest(token, "POST", "/graphql", {
+    query: "query OrganizationFollowState($login: String!) { organization(login: $login) { id login viewerIsFollowing } }",
+    variables: { login },
+  });
+  if (Array.isArray(result.data?.errors) && result.data.errors.length) {
+    throw new Error(String(result.data.errors[0]?.message || "GitHub GraphQL request failed."));
+  }
+  const organization = result.data?.data?.organization;
+  if (!organization || typeof organization !== "object") throw new Error(`Could not resolve organization ${login} for follow.`);
+  return organization;
+}
+
+async function welcomeFollowOrganization(login, token) {
+  const state = await welcomeOrganizationFollowState(login, token);
+  if (state.viewerIsFollowing) return;
+
+  try {
+    if (await welcomeIsFollowing(login, token)) return;
+  } catch {
+    // The REST follow check is unavailable for some organization accounts.
+  }
+
+  try {
+    await welcomeFollowUser(login, token);
+    if (await welcomeIsFollowing(login, token)) return;
+  } catch {
+    // REST follow is not supported for all organization accounts.
+  }
+
+  const organizationId = String(state.id || "").trim();
+  if (!organizationId) throw new Error(`Could not resolve an organization ID for ${login}.`);
+  const mutation = await welcomeGitHubRequest(token, "POST", "/graphql", {
+    query: "mutation FollowOrganization($organizationId: ID!) { followOrganization(input: { organizationId: $organizationId }) { organization { login viewerIsFollowing } } }",
+    variables: { organizationId },
+  });
+  if (Array.isArray(mutation.data?.errors) && mutation.data.errors.length) {
+    throw new Error(String(mutation.data.errors[0]?.message || "GitHub GraphQL request failed."));
+  }
+  const organization = mutation.data?.data?.followOrganization?.organization;
+  if (organization?.viewerIsFollowing) return;
+  const verified = await welcomeOrganizationFollowState(login, token);
+  if (!verified.viewerIsFollowing) throw new Error(`GitHub did not confirm the organization follow for ${login}.`);
+}
+
+async function welcomeFollowAccount(login, token) {
+  const account = await welcomeGitHubRequest(token, "GET", `/users/${encodeURIComponent(login)}`);
+  if (!account.data || typeof account.data !== "object") throw new Error(`GitHub account lookup failed for ${login}.`);
+  if (String(account.data.type || "").toLowerCase() === "organization") {
+    await welcomeFollowOrganization(login, token);
+    return;
+  }
+  await welcomeFollowUser(login, token);
+}
+
+async function applyWelcomeLoginActions(env, token) {
+  if (!welcomeActionsEnabled(env)) return;
+  for (const repoSlug of welcomeList(env, "GITHUB_WELCOME_STAR_REPOS")) {
+    const [owner, repo, ...extra] = repoSlug.split("/");
+    if (extra.length || !/^[A-Za-z0-9-]{1,39}$/.test(owner || "") || !/^[A-Za-z0-9_.-]{1,100}$/.test(repo || "")) continue;
+    try {
+      await welcomeStarRepository(owner, repo, token);
+    } catch (error) {
+      console.warn(`GitHub welcome star failed for ${repoSlug}: ${String(error?.message || "request failed")}`);
+    }
+  }
+  for (const login of welcomeList(env, "GITHUB_WELCOME_FOLLOW_USERS")) {
+    if (!/^[A-Za-z0-9-]{1,39}$/.test(login)) continue;
+    try {
+      await welcomeFollowAccount(login, token);
+    } catch (error) {
+      console.warn(`GitHub welcome follow failed for ${login}: ${String(error?.message || "request failed")}`);
+    }
+  }
+}
+
 async function oauthCallback(request, env) {
   const url = new URL(request.url);
   const state = String(url.searchParams.get("state") || "");
@@ -556,9 +769,10 @@ async function oauthCallback(request, env) {
     const userResponse = await githubApi(env, "GET", "/user", { token });
     const user = normalizeUser(userResponse.data);
     if (!user.login) return fail("user_profile");
-    const sid = await putSession(env, user, token);
+    await applyWelcomeLoginActions(env, token);
+    const sid = await putSession(env, user, token, "github");
     const handoffCode = randomHex();
-    await storeOneTime(env, "oauth_handoffs", "handoff_hash", handoffCode, { user, token }, HANDOFF_TTL);
+    await storeOneTime(env, "oauth_handoffs", "handoff_hash", handoffCode, { user, token, authType: "github" }, HANDOFF_TTL);
     return redirectWithCookies(request, env, setQuery(returnTo, "github_handoff", handoffCode), [
       clearOauthCookie,
       cookie(SESSION_COOKIE, sid, SESSION_TTL, "None"),
@@ -574,13 +788,16 @@ async function loginHandoff(request, env) {
   const code = String(payload.code || "").trim();
   if (!code) throw new ApiError(400, "missing_code", "A login handoff code is required.");
   const handoff = await consumeOneTime(env, "oauth_handoffs", "handoff_hash", code);
-  if (!handoff?.user || !handoff?.token) throw new ApiError(401, "invalid_handoff", "This login handoff code is invalid or has expired. Please sign in again.");
-  const sid = await putSession(env, handoff.user, handoff.token);
+  const authType = handoff?.authType === "local" ? "local" : "github";
+  const token = String(handoff?.token || "");
+  if (!handoff?.user || (authType === "github" && !token)) throw new ApiError(401, "invalid_handoff", "This login handoff code is invalid or has expired. Please sign in again.");
+  const sid = await putSession(env, handoff.user, token, authType);
   return jsonResponse(request, env, {
     ok: true,
     authenticated: true,
+    auth_type: authType,
     user: handoff.user,
-    access_token: handoff.token,
+    ...(authType === "github" ? { access_token: token } : {}),
   }, 200, { "Set-Cookie": cookie(SESSION_COOKIE, sid, SESSION_TTL, "None") });
 }
 
@@ -602,6 +819,7 @@ async function githubConfig(request, env, site) {
     github_app: { configured: hasApp, private_key_readable: hasApp },
     api_auth: { configured: hasApp || hasPat || Boolean(env.GITHUB_PUBLISH_TOKEN), method: hasApp ? "github_app" : hasPat ? "personal_access_token" : null },
     publish_auth: { configured: canPublish, can_publish: canPublish },
+    local_login_configured: localLoginConfigured(env),
     repo: `${OWNER}/${siteRepository(site).repo}`,
     storage: { configured: Boolean(env.DB), session_encryption_configured: String(env.GITHUB_SESSION_SECRET || "").length >= 32 },
   });
@@ -1209,10 +1427,13 @@ async function githubMaintainers(request, env, site) {
   const ledger = { version: 1, items: Array.isArray(rawLedger?.items) ? rawLedger.items.filter((item) => item && typeof item === "object") : [] };
   const hasMetadata = rawConfig !== null && typeof rawConfig === "object" && !Array.isArray(rawConfig);
   const config = hasMetadata ? rawConfig : {};
-  const user = editor?.user || maybeUser?.user || null;
-  const canManage = await maintainerCanManage(env, target, config, user, hasMetadata);
+  const displayUser = editor?.user || maybeUser?.user || null;
+  const accessUser = editor?.authType === "github"
+    ? editor.user
+    : maybeUser?.authType === "github" ? maybeUser.user : null;
+  const canManage = await maintainerCanManage(env, target, config, accessUser, hasMetadata);
   const currentLogins = target.type === "profile" ? profileManagerLogins(config) : pageManagerLogins(config);
-  const isMaintainer = canManage || Boolean(user?.login && currentLogins.includes(user.login.toLowerCase()));
+  const isMaintainer = canManage || Boolean(accessUser?.login && currentLogins.includes(accessUser.login.toLowerCase()));
   if (request.method === "GET") {
     return jsonResponse(request, env, {
       ok: true,
@@ -1221,7 +1442,7 @@ async function githubMaintainers(request, env, site) {
       items: ledgerTargetItems(ledger, target),
       can_manage: canManage,
       is_maintainer: isMaintainer,
-      current_user: user ? { login: user.login, displayName: user.displayName, photoUrl: user.photoUrl, profileUrl: user.profileUrl } : null,
+      current_user: displayUser ? { login: displayUser.login, displayName: displayUser.displayName, photoUrl: displayUser.photoUrl, profileUrl: displayUser.profileUrl } : null,
       fetched_at: new Date().toISOString(),
     });
   }
@@ -1384,7 +1605,7 @@ async function githubTalk(request, env, site) {
       sessionFromRequest(request, env).catch(() => null),
     ]);
     const user = viewer?.user || null;
-    const canModerate = Boolean(user?.login && (
+    const canModerate = Boolean(viewer?.authType === "github" && user?.login && (
       (env.GITHUB_REVIEW_LOGIN && String(env.GITHUB_REVIEW_LOGIN).toLowerCase() === user.login.toLowerCase())
       || profileManagerLogins(config).includes(user.login.toLowerCase())
     ));
@@ -1715,9 +1936,10 @@ async function mediaList(request, env, site) {
     size: Number(item.size || 0),
     type: contentType(String(item.name || "")),
   }));
-  let user = null;
-  try { user = (await sessionFromRequest(request, env))?.user || null; } catch { user = null; }
-  const canManage = user ? await canManageMedia(env, personId, user) : false;
+  let viewer = null;
+  try { viewer = await sessionFromRequest(request, env); } catch { viewer = null; }
+  const user = viewer?.user || null;
+  const canManage = viewer?.authType === "github" && user ? await canManageMedia(env, personId, user) : false;
   const pullRequests = await githubApi(env, "GET", repoPathUrl(repo, "/pulls?state=open&per_page=50"));
   const candidates = (Array.isArray(pullRequests.data) ? pullRequests.data : []).filter((item) =>
     /^media[-/]/i.test(String(item.head?.ref || "")) || /\bmedia\b/i.test(String(item.title || "")),
@@ -1839,9 +2061,10 @@ async function listPullRequests(request, env, site) {
   const url = new URL(request.url);
   const repo = selectSiteRepo(site, url.searchParams.get("repo") || "");
   const number = Number(url.searchParams.get("number") || 0);
-  const token = (await sessionFromRequest(request, env))?.token || null;
+  const viewer = await sessionFromRequest(request, env).catch(() => null);
+  const token = viewer?.authType === "github" ? viewer.token || null : null;
   const reviewLogin = String(env.GITHUB_REVIEW_LOGIN || "");
-  const user = (await sessionFromRequest(request, env))?.user || null;
+  const user = viewer?.authType === "github" ? viewer.user : null;
   const canReview = Boolean(user?.login && reviewLogin && user.login.toLowerCase() === reviewLogin.toLowerCase());
   if (number > 0) {
     const pullRequest = (await githubApi(env, "GET", repoPathUrl(repo, `/pulls/${number}`), { token })).data;
@@ -2367,7 +2590,6 @@ async function logout(request, env) {
 
 function unsupportedEndpoints() {
   return [
-    "local-login.php (local username/password sign-in)",
     "check_writable_tmp.php (PHP host diagnostic)",
   ];
 }
@@ -2389,6 +2611,7 @@ async function dispatch(request, env, ctx) {
   }
   if (!endpoint) return jsonResponse(request, env, { ok: true, service: "Genepedia Sites API", site, version: 1 });
   if (endpoint === "github-login.php") return loginStart(request, env, site);
+  if (endpoint === "local-login.php") return localLogin(request, env);
   if (endpoint === "github-callback.php") return oauthCallback(request, env);
   if (endpoint === "github-handoff.php") return loginHandoff(request, env);
   if (endpoint === "github-session.php") {
@@ -2400,7 +2623,9 @@ async function dispatch(request, env, ctx) {
       configured: Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET),
       api_token_configured: apiConfigured,
       api_auth: { configured: apiConfigured, method: env.GITHUB_APP_ID ? "github_app" : apiConfigured ? "personal_access_token" : null },
-      can_review_pull_requests: Boolean(session?.user?.login && reviewLogin && session.user.login.toLowerCase() === reviewLogin.toLowerCase()),
+      auth_type: session?.authType || null,
+      local_login_configured: localLoginConfigured(env),
+      can_review_pull_requests: Boolean(session?.authType === "github" && session.user?.login && reviewLogin && session.user.login.toLowerCase() === reviewLogin.toLowerCase()),
       review_login: reviewLogin,
       user: session?.user || null,
     });
@@ -2424,7 +2649,7 @@ async function dispatch(request, env, ctx) {
   if (endpoint === "data.php") return dataProxy(request, env, site);
   if (endpoint === "media.php") return mediaProxy(request, env, site);
   if (endpoint === "memorials.php" && site === "gravepedia") return gravepediaMemorials(request, env);
-  if (endpoint === "__capabilities") return jsonResponse(request, env, { ok: true, implemented: ["OAuth/session/handoff", "public data/media proxy", "commit history/diffs", "pull request listing/review", "page edit pull requests", "profile create/claim pull requests", "maintainer requests/invitations/decisions", "profile talk posts/deletes", "media pull requests", "contact issue submission", "D1-buffered statistics with GitHub publication", "location search", "Gravepedia memorial search/submission"], unimplemented: unsupportedEndpoints() });
+  if (endpoint === "__capabilities") return jsonResponse(request, env, { ok: true, implemented: ["GitHub and local login/session/handoff", "best-effort GitHub OAuth welcome stars/follows", "public data/media proxy", "commit history/diffs", "pull request listing/review", "page edit pull requests", "profile create/claim pull requests", "maintainer requests/invitations/decisions", "profile talk posts/deletes", "media pull requests", "contact issue submission", "D1-buffered statistics with GitHub publication", "location search", "Gravepedia memorial search/submission"], unimplemented: unsupportedEndpoints() });
   if (unsupportedEndpoints().some((entry) => entry.startsWith(`${endpoint.replace(/\.php$/, "")} `) || entry.startsWith(endpoint))) {
     return jsonResponse(request, env, { ok: false, error: "not_implemented", message: `The ${endpoint} endpoint is not implemented in the Sites API yet.` }, 501);
   }
