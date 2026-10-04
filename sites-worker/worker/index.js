@@ -1319,7 +1319,7 @@ function maintainerTarget(paths) {
   let personId = "";
   for (const path of paths) {
     if (!safeRepoPath(path)) { personId = ""; break; }
-    const match = path.match(/^people\/([A-Za-z0-9_-]+)\/(?:index\.html|profile\.html|data\/[A-Za-z0-9_.-]+|data\/|media\/[A-Za-z0-9_.-]+|media\/)/);
+    const match = path.match(/^(?:pages\/)?people\/([A-Za-z0-9_-]+)\/(?:index\.html|profile\.html|data\/[A-Za-z0-9_.-]+|data\/|media\/[A-Za-z0-9_.-]+|media\/)/);
     if (!match || (personId && personId !== match[1])) { personId = ""; break; }
     personId = match[1];
   }

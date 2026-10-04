@@ -615,6 +615,12 @@ try {
   assert.equal(maintainersBody.target.key, "profile:person-14");
   assert.deepEqual(maintainersBody.items, []);
 
+  const modernProfileMaintainersRead = await worker.fetch(new Request("https://api.genepedia.org/v1/genepedia/maintainers?paths=pages%2Fpeople%2F29%2Findex.html%2Cpages%2Fpeople%2F29%2Fprofile.html%2Cpages%2Fpeople%2F29%2Fdata%2Fprofile.html%2Cpages%2Fpeople%2F29%2Fdata%2Ftalk.json"), env);
+  assert.equal(modernProfileMaintainersRead.status, 200);
+  const modernProfileMaintainersBody = await modernProfileMaintainersRead.json();
+  assert.equal(modernProfileMaintainersBody.target.key, "profile:29", "maintainer access must accept the current pages/people profile history paths");
+  assert.equal(modernProfileMaintainersBody.target.editable_path, "pages/people/29/profile.html");
+
   const formerCreatorMaintainerRead = await worker.fetch(new Request("https://api.genepedia.org/v1/genepedia/maintainers?path=people/person-14/profile.html", {
     headers: { Authorization: "Bearer test-user-token" },
   }), env);
