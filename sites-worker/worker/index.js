@@ -1034,6 +1034,18 @@ async function getJsonFile(env, repo, path, token = null) {
   }
 }
 
+async function getJsonDirectory(env, repo, path, token = null) {
+  try {
+    const result = await githubApi(env, "GET", repoPathUrl(repo, `/contents/${encodePath(path)}`), { token });
+    return Array.isArray(result.data)
+      ? result.data.filter((item) => item?.type === "file" && String(item.name || "").toLowerCase().endsWith(".json") && typeof item.path === "string")
+      : [];
+  } catch (error) {
+    if (error?.status === 404) return [];
+    throw error;
+  }
+}
+
 function personBucket(personId) {
   const digits = String(personId).replace(/[^0-9]/g, "");
   const number = Number.parseInt(digits || "0", 10) || 0;
@@ -1686,10 +1698,18 @@ async function gravepediaMemorials(request, env) {
   if (request.method === "GET") {
     const url = new URL(request.url);
     const query = String(url.searchParams.get("q") || "").trim().replace(/\s+/g, " ").slice(0, 200);
-    const store = await getJsonFile(env, repo, "data/memorials/index.json");
+    const [store, approvedFiles] = await Promise.all([
+      getJsonFile(env, repo, "data/memorials/index.json"),
+      getJsonDirectory(env, repo, "data/memorials/pending"),
+    ]);
     const values = Array.isArray(store) ? store : Array.isArray(store?.memorials) ? store.memorials : Array.isArray(store?.records) ? store.records : Array.isArray(store?.results) ? store.results : [];
+    // The Contents API reads the default branch, so entries here are searchable only after their review PR has merged.
+    const approvedRecords = (await Promise.all(approvedFiles.map((file) => getJsonFile(env, repo, file.path))))
+      .filter((record) => record && typeof record === "object" && !Array.isArray(record));
+    const approvedIds = new Set(approvedRecords.map((record) => String(record.id || "")).filter(Boolean));
+    const allValues = [...values.filter((record) => !approvedIds.has(String(record?.id || ""))), ...approvedRecords];
     const needle = query.toLocaleLowerCase();
-    const matching = values.map(normalizeMemorial).filter((item) => !needle || Object.values(item).join(" ").toLocaleLowerCase().includes(needle));
+    const matching = allValues.map(normalizeMemorial).filter((item) => !needle || Object.values(item).join(" ").toLocaleLowerCase().includes(needle));
     const total = matching.length;
     const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") || 50)));
     return jsonResponse(request, env, { success: true, query, results: matching.slice(0, limit), total });

@@ -23,6 +23,12 @@ const records = [
     source: "",
   },
 ];
+const approvedMemorial = {
+  id: "approved-memorial",
+  name: "Tariro Ncube",
+  cemetery: "Harare Memorial Park",
+  status: "pending",
+};
 const originalFetch = globalThis.fetch;
 let deniedUserWrites = 0;
 let fallbackWrites = 0;
@@ -194,6 +200,20 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (url.pathname === "/repos/Genepedia/Gravepedia/contents/data/memorials/index.json") {
     const content = Buffer.from(JSON.stringify(records)).toString("base64");
+    return new Response(JSON.stringify({ type: "file", content }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  if (url.pathname === "/repos/Genepedia/Gravepedia/contents/data/memorials/pending") {
+    return new Response(JSON.stringify([{
+      type: "file",
+      name: "approved-memorial.json",
+      path: "data/memorials/pending/approved-memorial.json",
+    }]), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/repos/Genepedia/Gravepedia/contents/data/memorials/pending/approved-memorial.json") {
+    const content = Buffer.from(JSON.stringify(approvedMemorial)).toString("base64");
     return new Response(JSON.stringify({ type: "file", content }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -468,6 +488,12 @@ try {
   assert.equal(searchBody.query, "amina");
   assert.equal(searchBody.total, 1);
   assert.equal(searchBody.results[0].name, "Amina Ndlovu");
+
+  const approvedSearch = await worker.fetch(new Request("https://api.genepedia.org/gravepedia/memorials.php?q=tariro"), env);
+  assert.equal(approvedSearch.status, 200);
+  const approvedSearchBody = await approvedSearch.json();
+  assert.equal(approvedSearchBody.total, 1, "a memorial file on the default branch should appear after its review pull request is merged");
+  assert.equal(approvedSearchBody.results[0].name, "Tariro Ncube");
 
   const unauthenticatedSubmission = await worker.fetch(new Request("https://api.genepedia.org/gravepedia/memorials.php", {
     method: "POST",

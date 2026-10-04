@@ -20,10 +20,10 @@ or repository.
 
 Public content reads use the GitHub API and raw file URLs. Writes use a
 server-side GitHub App installation token or a publish token, and create a
-branch plus review pull request. The Gravepedia memorial search reads only
-`data/memorials/index.json`; submissions are written beneath
-`data/memorials/pending/` in a pull request, so they do not appear in public
-search before a maintainer merges them.
+branch plus review pull request. Gravepedia search reads
+`data/memorials/index.json` and JSON submissions under
+`data/memorials/pending/` on the default branch. Submissions appear in public
+search only after a maintainer merges their review pull request.
 
 ## Storage and bindings
 
