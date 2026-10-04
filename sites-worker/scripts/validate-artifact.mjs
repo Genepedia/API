@@ -18,6 +18,7 @@ const openApi = JSON.parse(openApiText);
 assert.equal(openApi.openapi, "3.1.0");
 assert.equal(openApi.servers[0]?.url, "https://api.genepedia.org/v1");
 for (const route of [
+  "/openapi.json",
   "/genepedia/auth/github/config",
   "/genepedia/auth/session",
   "/genepedia/files/commits",
@@ -40,5 +41,9 @@ assert.equal(
   "function",
   `${pathToFileURL(workerPath)} must export default.fetch`,
 );
+
+const openApiResponse = await workerModule.default.fetch(new Request("https://api.genepedia.org/v1/openapi.json"));
+assert.equal(openApiResponse.status, 200);
+assert.deepEqual(await openApiResponse.json(), openApi, "the API's documented OpenAPI endpoint must serve its contract");
 
 console.log("Artifact is valid ESM and exports default.fetch");

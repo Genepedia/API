@@ -1,6 +1,7 @@
 const OWNER = "Genepedia";
 const API_VERSION = "2022-11-28";
 const SESSION_COOKIE = "__Host-genepedia_session";
+const OPENAPI_SPEC_JSON = "__OPENAPI_SPEC_JSON__";
 const OAUTH_COOKIE = "__Host-genepedia_oauth";
 const SESSION_TTL = 60 * 60 * 24 * 30;
 const OAUTH_STATE_TTL = 10 * 60;
@@ -2677,7 +2678,7 @@ function apiDescription(request, env, site = "") {
     ...(site ? { site, version: 1, base: `/v1/${site}` } : {
       sites: { genepedia: "/v1/genepedia", gravepedia: "/v1/gravepedia" },
       github_callback: "/v1/auth/github/callback",
-      openapi: "https://raw.githubusercontent.com/Genepedia/API/main/sites-worker/openapi.json",
+      openapi: "https://api.genepedia.org/v1/openapi.json",
     }),
   });
 }
@@ -2703,6 +2704,7 @@ async function dispatch(request, env, ctx) {
   const url = new URL(request.url);
   const route = url.pathname.replace(/\/+$/, "") || "/";
   if (route === "/" || route === "/v1") return withMethods(request, env, ["GET"], () => apiDescription(request, env));
+  if (route === "/v1/openapi.json") return withMethods(request, env, ["GET"], () => new Response(env.OPENAPI_SPEC_JSON || OPENAPI_SPEC_JSON, { status: 200, headers: { ...corsHeaders(request, env), "Content-Type": "application/json; charset=utf-8", "Cache-Control": "public, max-age=300" } }));
   if (route === "/v1/auth/github/callback") return withMethods(request, env, ["GET"], () => oauthCallback(request, env));
 
   let site = "";

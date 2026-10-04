@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import worker from "../worker/index.js";
+import worker from "../dist/server/index.js";
 
 const records = [
   {
@@ -323,6 +323,10 @@ try {
   assert.equal(discoveryBody.api_version, 1);
   assert.equal(discoveryBody.sites.genepedia, "/v1/genepedia");
   assert.equal(discoveryBody.sites.gravepedia, "/v1/gravepedia");
+  assert.equal(discoveryBody.openapi, "https://api.genepedia.org/v1/openapi.json");
+  const openApiResponse = await worker.fetch(new Request(discoveryBody.openapi), env);
+  assert.equal(openApiResponse.status, 200);
+  assert.equal((await openApiResponse.json()).openapi, "3.1.0");
 
   const wrongSessionMethod = await worker.fetch(new Request("https://api.genepedia.org/v1/genepedia/auth/session", { method: "POST" }), env);
   assert.equal(wrongSessionMethod.status, 405);

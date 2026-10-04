@@ -32,6 +32,16 @@
     }
   ],
   "paths": {
+    "/openapi.json": {
+      "get": {
+        "summary": "Download this OpenAPI contract",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 contract as JSON"
+          }
+        }
+      }
+    },
     "/": {
       "get": {
         "summary": "Discover API version and site bases",
