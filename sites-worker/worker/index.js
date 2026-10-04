@@ -13,6 +13,7 @@ const DEFAULT_ORIGINS = [
   "https://www.gravepedia.org",
 ];
 const WINDOWS = ["24h", "3d", "7d", "30d", "60d", "90d", "6m", "1y", "all"];
+const MAX_QUEUED_STATISTICS_EVENTS = 10_000;
 
 // Requests select only these repositories. No endpoint accepts an owner or repo
 // name from an arbitrary caller.
@@ -185,10 +186,11 @@ function bytesToBase64(value) {
 }
 
 class ApiError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details = null) {
     super(message);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -873,16 +875,50 @@ function groupedFilesForWorkspace(files) {
 
 async function publishPullRequestGroups(env, groups, options) {
   const results = [];
+  const created = [];
   const pending = groups.filter((group) => group.files.length);
   for (const group of pending) {
     const totalBytes = group.files.reduce((sum, file) => sum + new TextEncoder().encode(String(file.content || "")).length, 0);
     if (totalBytes > 4_000_000) throw new ApiError(413, "files_too_large", "The submitted repository changes exceed the 4 MB limit.");
   }
   for (const group of pending) {
-    const result = await createPullRequest(env, group.repo, group.files, {
-      ...options,
-      accessToken: options.accessToken || "",
-    });
+    let result;
+    try {
+      result = await createPullRequest(env, group.repo, group.files, {
+        ...options,
+        accessToken: options.accessToken || "",
+      });
+    } catch (error) {
+      if (!created.length) throw error;
+      const cleanup = [];
+      for (const item of [...created].reverse()) {
+        const number = Number(item.result.pull_request?.number || 0);
+        const state = { repo: `${item.group.repo.owner}/${item.group.repo.repo}`, number, url: String(item.result.pull_request?.url || ""), branch: item.result.branch, closed: false, branch_deleted: false };
+        try {
+          if (!number) throw new ApiError(502, "pull_request_id_unavailable", "The created pull request did not include a usable number.");
+          await githubWriteWithFallback(env, options.accessToken || "", "PATCH", repoPathUrl(item.group.repo, `/pulls/${number}`), { state: "closed" });
+          state.closed = true;
+          try {
+            await githubWriteWithFallback(env, options.accessToken || "", "DELETE", repoPathUrl(item.group.repo, `/git/refs/heads/${encodePath(item.result.branch)}`));
+            state.branch_deleted = true;
+          } catch (cleanupError) {
+            state.cleanup_error = String(cleanupError?.code || "branch_delete_failed");
+          }
+        } catch (cleanupError) {
+          state.cleanup_error = String(cleanupError?.code || "pull_request_close_failed");
+        }
+        cleanup.push(state);
+      }
+      const createdPullRequests = results.map((item) => ({ repo: item.repo, number: Number(item.pull_request?.number || 0), url: String(item.pull_request?.url || ""), branch: item.branch }));
+      const openPullRequests = cleanup.filter((item) => !item.closed).map(({ repo, number, url, branch }) => ({ repo, number, url, branch }));
+      throw new ApiError(502, "partial_publish_failed", "A later repository update failed. Earlier pull requests were closed where possible; review the cleanup details before retrying.", {
+        failed_repo: `${group.repo.owner}/${group.repo.repo}`,
+        cause: String(error?.code || "repository_publish_failed"),
+        created_pull_requests: createdPullRequests,
+        cleanup,
+        open_pull_requests: openPullRequests,
+      });
+    }
     results.push({
       kind: group.repo.repo === "Genepedia-Database" ? "database" : "site",
       repo: `${group.repo.owner}/${group.repo.repo}`,
@@ -894,6 +930,7 @@ async function publishPullRequestGroups(env, groups, options) {
       pull_request: result.pull_request,
       published_directly: false,
     });
+    created.push({ group, result });
   }
   const primary = results.find((result) => result.kind === "site") || results[0] || {};
   return {
@@ -1083,10 +1120,32 @@ function pageManagerLogins(config) {
 async function pathCreatedByUser(env, repo, path, login) {
   if (!login) return false;
   try {
-    const commits = (await githubApi(env, "GET", repoPathUrl(repo, `/commits?path=${encodeURIComponent(path)}&per_page=100`))).data;
+    const commitsPath = repoPathUrl(repo, `/commits?path=${encodeURIComponent(path)}&per_page=100&page=1`);
+    const firstPage = await githubApi(env, "GET", commitsPath);
+    const firstCommits = Array.isArray(firstPage.data) ? firstPage.data : [];
+    const lastPage = lastCommitHistoryPage(firstPage.headers.get("Link"));
+    if (!lastPage && firstCommits.length >= 100) return false;
+    const commits = lastPage > 1
+      ? (await githubApi(env, "GET", repoPathUrl(repo, `/commits?path=${encodeURIComponent(path)}&per_page=100&page=${lastPage}`))).data
+      : firstCommits;
     const oldest = Array.isArray(commits) ? commits[commits.length - 1] : null;
     return String(oldest?.author?.login || "").toLowerCase() === login.toLowerCase();
   } catch { return false; }
+}
+
+function lastCommitHistoryPage(linkHeader) {
+  for (const link of String(linkHeader || "").split(/,\s*(?=<)/)) {
+    if (!/;\s*rel=["']?last["']?\s*(?:,|$)/i.test(link)) continue;
+    const match = link.match(/<([^>]+)>/);
+    if (!match) return 0;
+    try {
+      const url = new URL(match[1]);
+      if (url.origin !== "https://api.github.com" || !url.pathname.endsWith("/commits")) return 0;
+      const page = Number(url.searchParams.get("page"));
+      return Number.isSafeInteger(page) && page >= 1 ? page : 0;
+    } catch { return 0; }
+  }
+  return 0;
 }
 
 async function maintainerCanManage(env, target, config, user, hasMetadata = false) {
@@ -1499,6 +1558,21 @@ async function writeTokens(env, preferredToken = "") {
   return values;
 }
 
+async function githubWriteWithFallback(env, preferredToken, method, path, body) {
+  const tokens = await writeTokens(env, preferredToken);
+  if (!tokens.length) throw new ApiError(503, "publish_auth_unavailable", "GitHub repository write access is not configured.");
+  let lastError = null;
+  for (const token of tokens) {
+    try {
+      return await githubApi(env, method, path, { token, body });
+    } catch (error) {
+      lastError = error;
+      if (![401, 403, 404, 502, 503].includes(Number(error?.status))) throw error;
+    }
+  }
+  throw lastError || new ApiError(503, "publish_auth_unavailable", "GitHub repository write access is not configured.");
+}
+
 function githubCommitIdentity(user = {}) {
   const login = String(user.login || "editor");
   const id = String(user.id || "");
@@ -1704,8 +1778,8 @@ async function mediaWrite(request, env, site) {
       throw new ApiError(400, "not_media_pull_request", "That pull request is not a media change for this profile.");
     }
     const result = action === "approve"
-      ? (await githubApi(env, "PUT", repoPathUrl(repo, `/pulls/${number}/merge`), { token: user.token, body: { merge_method: "squash" } })).data
-      : (await githubApi(env, "PATCH", repoPathUrl(repo, `/pulls/${number}`), { token: user.token, body: { state: "closed" } })).data;
+      ? (await githubWriteWithFallback(env, user.token, "PUT", repoPathUrl(repo, `/pulls/${number}/merge`), { merge_method: "squash" })).data
+      : (await githubWriteWithFallback(env, user.token, "PATCH", repoPathUrl(repo, `/pulls/${number}`), { state: "closed" })).data;
     return jsonResponse(request, env, { ok: true, repo: `${repo.owner}/${repo.repo}`, person: personId, action, number, result, reviewed_at: new Date().toISOString() });
   }
   const filename = String(payload.filename || "").trim().toLowerCase().replace(/\s+/g, "-");
@@ -1801,9 +1875,9 @@ async function reviewPullRequest(request, env, site) {
   const repo = selectSiteRepo(site, payload.repo || "");
   let result;
   if (action === "merge") {
-    result = (await githubApi(env, "PUT", repoPathUrl(repo, `/pulls/${number}/merge`), { token: user.token, body: { merge_method: "squash" } })).data;
+    result = (await githubWriteWithFallback(env, user.token, "PUT", repoPathUrl(repo, `/pulls/${number}/merge`), { merge_method: "squash" })).data;
   } else {
-    result = (await githubApi(env, "PATCH", repoPathUrl(repo, `/pulls/${number}`), { token: user.token, body: { state: "closed" } })).data;
+    result = (await githubWriteWithFallback(env, user.token, "PATCH", repoPathUrl(repo, `/pulls/${number}`), { state: "closed" })).data;
   }
   return jsonResponse(request, env, { ok: true, repo: `${repo.owner}/${repo.repo}`, number, action, result, reviewed_at: new Date().toISOString() });
 }
@@ -2177,8 +2251,10 @@ async function enqueueStatisticsEvent(request, env, payload, legacyProfileViews)
   const event = normalizeStatisticsEvent(payload, legacyProfileViews);
   const database = await ensureStorage(env);
   const eventId = randomHex();
-  await database.prepare("INSERT INTO statistics_events (event_id, payload, created_at) VALUES (?1, ?2, ?3)")
-    .bind(eventId, JSON.stringify(event), event.created_at).run();
+  const inserted = await database.prepare(
+    "INSERT INTO statistics_events (event_id, payload, created_at) SELECT ?1, ?2, ?3 WHERE (SELECT COUNT(*) FROM statistics_events) < ?4 RETURNING event_id",
+  ).bind(eventId, JSON.stringify(event), event.created_at, MAX_QUEUED_STATISTICS_EVENTS).first();
+  if (!inserted) throw new ApiError(429, "statistics_queue_full", "The statistics queue is full. Please retry after queued events have been published.");
   const count = await statisticsQueueCount(database);
   const lastFlushed = await database.prepare("SELECT meta_value FROM statistics_meta WHERE meta_key = 'last_flushed_at'").first();
   const lastFlushedAt = Date.parse(String(lastFlushed?.meta_value || "")) || 0;
@@ -2357,7 +2433,7 @@ export default {
     try {
       return await dispatch(request, env, ctx);
     } catch (error) {
-      if (error instanceof ApiError) return jsonResponse(request, env, { ok: false, success: false, error: error.code, message: error.message }, error.status);
+      if (error instanceof ApiError) return jsonResponse(request, env, { ok: false, success: false, error: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) }, error.status);
       return jsonResponse(request, env, { ok: false, success: false, error: "internal_error", message: "The API request could not be completed." }, 500);
     }
   },

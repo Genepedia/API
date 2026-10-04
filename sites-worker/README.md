@@ -106,15 +106,18 @@ Routes keep their `.php` suffix where the existing frontend expects it.
   existing database ownership records.
 - Maintainers: `github-maintainers.php` reads the ownership ledger and submits
   request, invitation, acceptance, decline, approval, and cancellation PRs.
-  Cross-repository updates produce one PR per fixed repository.
+  Cross-repository updates produce one PR per fixed repository; if a later PR
+  fails, earlier PRs are closed and their branches deleted where possible, and
+  any remaining open PRs are reported in the error response.
 - Talk: `github-talk.php` publicly reads profile discussions and directly
   commits signed-in posts/deletions to the site repository. Authors, profile
   owners, maintainers, and the configured reviewer can delete a message.
 - Statistics: `github-statistics.php` supports public GET reads and anonymous
-  POST events. Events buffer in D1 and publish in bounded batches to the
-  database repository; `github-profile-views.php` remains a backward-compatible
-  read/write wrapper. `github-statistics-flush.php` accepts authenticated GET or
-  POST requests for scheduled flushes.
+  POST events. Events buffer in D1 up to a hard 10,000-event limit; a saturated
+  queue rejects new events with HTTP 429 until events publish. Events publish
+  in bounded batches to the database repository; `github-profile-views.php`
+  remains a backward-compatible read/write wrapper. `github-statistics-flush.php`
+  accepts authenticated GET or POST requests for scheduled flushes.
 - Gravepedia: `memorials.php?q=...` returns
   `{success, query, results, total}`; `POST memorials.php` requires GitHub sign-in
   and opens a pending-review memorial submission PR.
@@ -151,6 +154,8 @@ npm run validate
 The build copies the Worker ESM entry point and Sites hosting manifest to
 `dist/`. Validation checks the emitted ESM artifact and exercises CORS,
 memorial search/submission auth, fixed-repository path rejection, profile and
-maintainer route validation, talk reads/writes auth, D1 statistics buffering,
-and the flush-secret gate with local mocks. It does not contact GitHub or
-require secrets.
+maintainer route validation, talk reads/writes auth, authorized reviewer/media
+write-token fallback, oldest-commit history pagination, cleanup after a
+second-repository PR failure, atomic D1 statistics queue saturation, and the
+flush-secret gate with local mocks. It does not contact GitHub or require
+secrets.

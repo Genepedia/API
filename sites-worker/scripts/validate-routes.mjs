@@ -24,10 +24,16 @@ const records = [
   },
 ];
 const originalFetch = globalThis.fetch;
+let deniedUserWrites = 0;
+let fallbackWrites = 0;
+let failDatabasePullRequestCreation = false;
+let rolledBackPullRequests = 0;
+let rolledBackSiteBranches = 0;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url);
   assert.equal(url.hostname, "api.github.com", "route test should only fetch the mocked GitHub API");
   const method = init.method || input?.method || "GET";
+  const authorization = init.headers?.Authorization || input?.headers?.get?.("Authorization") || "";
   if (url.pathname === "/user") {
     return new Response(JSON.stringify({ id: 41, login: "test-user", name: "Test User", avatar_url: "https://avatars.example/test", html_url: "https://github.com/test-user" }), {
       status: 200,
@@ -44,6 +50,57 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === "/repos/Genepedia/Genepedia/commits" && url.searchParams.get("path") === "pages/people/person-14/index.html") {
     return new Response(JSON.stringify([{ author: { login: "current-owner" } }, { author: { login: "test-user" } }]), { status: 200, headers: { "Content-Type": "application/json" } });
   }
+  if (url.pathname === "/repos/Genepedia/Genepedia/commits" && url.searchParams.get("path") === "pages/about.html") {
+    if (url.searchParams.get("page") === "4") {
+      return new Response(JSON.stringify([{ author: { login: "older-author" } }, { author: { login: "test-user" } }]), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    const recentCommits = Array.from({ length: 100 }, (_, index) => ({ author: { login: index === 99 ? "recent-page-oldest" : "recent-author" } }));
+    const links = '<https://api.github.com/repos/Genepedia/Genepedia/commits?path=pages%2Fabout.html&per_page=100&page=4>; rel="last"';
+    return new Response(JSON.stringify(recentCommits), { status: 200, headers: { "Content-Type": "application/json", Link: links } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/contents/data/maintainer-invitations.json") {
+    const ledger = { version: 1, items: [{ id: "maint-pending-1", target: { key: "profile:person-14" }, kind: "request", status: "pending", person: { githubLogin: "candidate-user" } }] };
+    const content = Buffer.from(JSON.stringify(ledger)).toString("base64");
+    return new Response(JSON.stringify({ type: "file", content }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/git/ref/heads/main" && method === "GET") {
+    return new Response(JSON.stringify({ object: { sha: "base-commit" } }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/git/commits/base-commit" && method === "GET") {
+    return new Response(JSON.stringify({ tree: { sha: "base-tree" } }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/git/blobs" && method === "POST") {
+    return new Response(JSON.stringify({ sha: "site-blob" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/git/trees" && method === "POST") {
+    return new Response(JSON.stringify({ sha: "site-tree" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/git/commits" && method === "POST") {
+    return new Response(JSON.stringify({ sha: "site-commit", html_url: "https://github.com/Genepedia/Genepedia/commit/site-commit" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/git/refs" && method === "POST") {
+    return new Response(JSON.stringify({ ref: "refs/heads/maintainer-test" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia-Database/git/refs" && method === "POST") {
+    return new Response(JSON.stringify({ ref: "refs/heads/maintainer-test-db" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/pulls" && method === "POST") {
+    return new Response(JSON.stringify({ number: 51, html_url: "https://github.com/Genepedia/Genepedia/pull/51", title: "Approve maintainer", state: "open" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia-Database/pulls" && method === "POST") {
+    return new Response(JSON.stringify({ message: "Validation failed" }), { status: 422, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname.startsWith("/repos/Genepedia/Genepedia-Database/git/refs/heads/") && method === "DELETE") {
+    return new Response(null, { status: 204 });
+  }
+  if (failDatabasePullRequestCreation && url.pathname === "/repos/Genepedia/Genepedia/pulls/51" && method === "PATCH") {
+    rolledBackPullRequests += 1;
+    return new Response(JSON.stringify({ number: 51, state: "closed" }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (failDatabasePullRequestCreation && url.pathname.startsWith("/repos/Genepedia/Genepedia/git/refs/heads/") && method === "DELETE") {
+    rolledBackSiteBranches += 1;
+    return new Response(null, { status: 204 });
+  }
   if (url.pathname === "/repos/Genepedia/Genepedia-Database" && method === "GET") {
     return new Response(JSON.stringify({ default_branch: "main" }), { status: 200, headers: { "Content-Type": "application/json" } });
   }
@@ -51,6 +108,31 @@ globalThis.fetch = async (input, init = {}) => {
     const ownership = { creator: { githubLogin: "test-user" }, owner: { githubLogin: "current-owner" }, maintainers: [{ githubLogin: "current-maintainer" }] };
     const content = Buffer.from(JSON.stringify(ownership)).toString("base64");
     return new Response(JSON.stringify({ type: "file", content }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/repos/Genepedia/Genepedia-Database/contents/people/ownership/0/person-77.json") {
+    const ownership = { creator: { githubLogin: "another-user" }, owner: { githubLogin: "test-user" }, maintainers: [] };
+    const content = Buffer.from(JSON.stringify(ownership)).toString("base64");
+    return new Response(JSON.stringify({ type: "file", content }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/repos/Genepedia/Genepedia-Media/pulls/9" && method === "GET") {
+    return new Response(JSON.stringify({ number: 9, head: { ref: "media-upload-person-77" } }), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/repos/Genepedia/Genepedia-Media/pulls/9/files" && method === "GET") {
+    return new Response(JSON.stringify([{ filename: "pages/people/person-77/avatar.png" }]), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if ((url.pathname === "/repos/Genepedia/Genepedia/pulls/17/merge" && method === "PUT")
+    || (url.pathname === "/repos/Genepedia/Genepedia/pulls/17" && method === "PATCH")
+    || (url.pathname === "/repos/Genepedia/Genepedia-Media/pulls/9/merge" && method === "PUT")
+    || (url.pathname === "/repos/Genepedia/Genepedia-Media/pulls/9" && method === "PATCH")) {
+    if (authorization === "Bearer test-user-token") {
+      deniedUserWrites += 1;
+      return new Response(JSON.stringify({ message: "Resource not accessible by integration" }), { status: 403, headers: { "Content-Type": "application/json" } });
+    }
+    if (authorization === "Bearer validation-only-token") {
+      fallbackWrites += 1;
+      const data = method === "PUT" ? { merged: true, sha: "fallback-merge" } : { number: 9, state: "closed" };
+      return new Response(JSON.stringify(data), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
   }
   if (url.pathname === "/repos/Genepedia/Genepedia-Database/git/ref/heads/main" && method === "GET") {
     return new Response(JSON.stringify({ object: { sha: "base-commit" } }), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -94,6 +176,12 @@ class MemoryD1 {
       values: [],
       bind: (...values) => { statement.values = values; return statement; },
       first: async () => {
+        if (sql.startsWith("INSERT INTO statistics_events") && sql.includes("SELECT ?1")) {
+          const [event_id, payload, created_at, cap] = statement.values;
+          if (this.events.length >= Number(cap)) return null;
+          this.events.push({ event_id, payload, created_at });
+          return { event_id };
+        }
         if (sql.includes("COUNT(*) AS count FROM statistics_events")) return { count: this.events.length };
         if (sql.includes("SELECT meta_value FROM statistics_meta")) return { meta_value: this.meta.get(statement.values[0]) };
         if (sql.startsWith("INSERT INTO statistics_flush_locks")) {
@@ -199,6 +287,30 @@ try {
   assert.equal(formerCreatorMaintainerRead.status, 200);
   assert.equal((await formerCreatorMaintainerRead.json()).can_manage, false, "a former creator excluded by existing owner/maintainer metadata must not regain manager access through file authorship");
 
+  const oldestCommitMaintainerRead = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-maintainers.php?path=pages/about.html", {
+    headers: { Authorization: "Bearer test-user-token" },
+  }), env);
+  assert.equal(oldestCommitMaintainerRead.status, 200);
+  assert.equal((await oldestCommitMaintainerRead.json()).can_manage, true, "creator fallback must inspect the oldest paginated commit, beyond the first 100 history entries");
+
+  failDatabasePullRequestCreation = true;
+  const partialMaintainerWrite = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-maintainers.php?path=people/person-14/profile.html", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-user-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "approve", id: "maint-pending-1", path: "people/person-14/profile.html" }),
+  }), { GITHUB_REVIEW_LOGIN: "test-user", GITHUB_PUBLISH_TOKEN: "validation-only-token" });
+  failDatabasePullRequestCreation = false;
+  const partialMaintainerBody = await partialMaintainerWrite.json();
+  assert.equal(partialMaintainerWrite.status, 502, JSON.stringify(partialMaintainerBody));
+  assert.equal(partialMaintainerBody.error, "partial_publish_failed");
+  assert.equal(partialMaintainerBody.details.failed_repo, "Genepedia/Genepedia-Database");
+  assert.equal(partialMaintainerBody.details.created_pull_requests.length, 1);
+  assert.equal(partialMaintainerBody.details.cleanup[0].closed, true);
+  assert.equal(partialMaintainerBody.details.cleanup[0].branch_deleted, true);
+  assert.deepEqual(partialMaintainerBody.details.open_pull_requests, []);
+  assert.equal(rolledBackPullRequests, 1, "a site pull request must be closed if the second repository submission fails");
+  assert.equal(rolledBackSiteBranches, 1, "the closed partial site pull request branch must be deleted");
+
   const talkWriteAuth = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-talk.php", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -215,6 +327,42 @@ try {
   const talkWriteBody = await talkWrite.json();
   assert.equal(talkWriteBody.message.author_login, "test-user");
   assert.equal(talkWriteBody.commit.sha, "talk-commit");
+
+  const reviewEnv = { GITHUB_REVIEW_LOGIN: "test-user", GITHUB_PUBLISH_TOKEN: "validation-only-token" };
+  const reviewMerge = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-pull-request-review.php", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-user-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "merge", number: 17, repo: "Genepedia/Genepedia" }),
+  }), reviewEnv);
+  assert.equal(reviewMerge.status, 200);
+  assert.equal((await reviewMerge.json()).result.merged, true);
+
+  const reviewDecline = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-pull-request-review.php", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-user-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "decline", number: 17, repo: "Genepedia/Genepedia" }),
+  }), reviewEnv);
+  assert.equal(reviewDecline.status, 200);
+  assert.equal((await reviewDecline.json()).result.state, "closed");
+
+  const mediaReviewEnv = { GITHUB_PUBLISH_TOKEN: "validation-only-token" };
+  const mediaApprove = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-media.php", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-user-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "approve", person_id: "person-77", number: 9 }),
+  }), mediaReviewEnv);
+  assert.equal(mediaApprove.status, 200);
+  assert.equal((await mediaApprove.json()).result.merged, true);
+
+  const mediaDecline = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-media.php", {
+    method: "POST",
+    headers: { Authorization: "Bearer test-user-token", "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "decline", person_id: "person-77", number: 9 }),
+  }), mediaReviewEnv);
+  assert.equal(mediaDecline.status, 200);
+  assert.equal((await mediaDecline.json()).result.state, "closed");
+  assert.equal(deniedUserWrites, 4, "each gated review write should try the signed-in user token first");
+  assert.equal(fallbackWrites, 4, "each review write should retry with the configured server token after user-token denial");
 
   const invalidStatistics = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-statistics.php", {
     method: "POST",
@@ -234,6 +382,17 @@ try {
   assert.equal(statisticsBody.ok, true);
   assert.equal(statisticsBody.publish.buffered, true);
   assert.equal(env.DB.events.length, 1, "statistics events should be durable in D1 before GitHub publishing");
+
+  const saturatedDb = new MemoryD1();
+  saturatedDb.events = Array.from({ length: 10_000 }, (_, index) => ({ event_id: `queued-${index}`, payload: "{}", created_at: "2026-10-04T00:00:00.000Z" }));
+  const saturatedStats = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-statistics.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ event: "profile_view", kind: "person", person_id: "person-14" }),
+  }), { DB: saturatedDb });
+  assert.equal(saturatedStats.status, 429);
+  assert.equal((await saturatedStats.json()).error, "statistics_queue_full");
+  assert.equal(saturatedDb.events.length, 10_000, "a saturated queue must reject inserts without exceeding the hard D1 cap");
 
   const publishingEnv = { DB: new MemoryD1(), GITHUB_PUBLISH_TOKEN: "validation-only-token" };
   const publishedStats = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-statistics.php", {
