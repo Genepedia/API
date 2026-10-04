@@ -465,7 +465,7 @@ function normalizeReturnTo(value, site, env) {
 }
 
 function callbackUrl(env) {
-  return String(env.GITHUB_CALLBACK_URL || "https://api.genepedia.org/genepedia/github-callback.php").trim();
+  return String(env.GITHUB_CALLBACK_URL || "https://api.genepedia.org/v1/auth/github/callback").trim();
 }
 
 function isGitHubAppClientId(value) {
@@ -857,6 +857,14 @@ function workspacePathFor(site, input) {
   return null;
 }
 
+function historyContextFor(site, input) {
+  const path = safeRepoPath(input);
+  if (!path) return null;
+  const fileName = path.slice(path.lastIndexOf("/") + 1);
+  const historyPath = path.startsWith("pages/") && !fileName.includes(".") ? `${path}.html` : path;
+  return workspacePathFor(site, historyPath);
+}
+
 function historyPaths(url) {
   const values = url.searchParams.get("paths") || url.searchParams.get("path") || "";
   if (!values.trim()) return null;
@@ -870,7 +878,7 @@ async function fileCommits(request, env, site) {
   const url = new URL(request.url);
   const paths = historyPaths(url);
   if (!paths) throw new ApiError(400, "invalid_path", "A valid repository file path or paths query is required.");
-  const contexts = paths.map((path) => workspacePathFor(site, path));
+  const contexts = paths.map((path) => historyContextFor(site, path));
   if (contexts.some((context) => !context)) throw new ApiError(400, "invalid_path", "This path is outside the repositories allowed for the site.");
   const context = contexts[0];
   if (contexts.some((item) => item.repo.repo !== context.repo.repo)) throw new ApiError(400, "invalid_path", "Commit history can only be fetched from one fixed repository per request.");
@@ -911,7 +919,7 @@ async function fileCommitDiff(request, env, site) {
   const paths = historyPaths(url);
   const hash = String(url.searchParams.get("hash") || "");
   if (!paths || !/^[a-f0-9]{7,64}$/i.test(hash)) throw new ApiError(400, "invalid_request", "A valid path and commit hash are required.");
-  const contexts = paths.map((path) => workspacePathFor(site, path));
+  const contexts = paths.map((path) => historyContextFor(site, path));
   if (contexts.some((context) => !context) || contexts.some((item) => item.repo.repo !== contexts[0].repo.repo)) {
     throw new ApiError(400, "invalid_request", "Diff lookup is limited to one fixed repository and allowed paths.");
   }
@@ -2610,31 +2618,114 @@ async function logout(request, env) {
 
 function unsupportedEndpoints() {
   return [
-    "check_writable_tmp.php (PHP host diagnostic)",
+    "temporary-storage-check",
   ];
+}
+
+function capabilities(request, env, site) {
+  const implemented = [
+    "GitHub and local login/session/handoff",
+    "best-effort GitHub OAuth welcome stars/follows",
+    "public data/media proxy",
+    "commit history/diffs",
+    "pull request listing/review",
+    "page edit pull requests",
+    "media pull requests",
+    "contact issue submission",
+    "D1-buffered statistics with GitHub publication",
+    "location search",
+  ];
+  if (site === "genepedia") implemented.push("profile create/claim pull requests", "maintainer requests/invitations/decisions", "profile talk posts/deletes");
+  if (site === "gravepedia") implemented.push("Gravepedia memorial search/submission");
+  return jsonResponse(request, env, { ok: true, api_version: 1, site, implemented, unimplemented: unsupportedEndpoints() });
+}
+
+const LEGACY_ENDPOINT_ALIASES = {
+  "github-config.php": "auth/github/config",
+  "github-login.php": "auth/github/login",
+  "local-login.php": "auth/local/login",
+  "github-callback.php": "auth/github/callback",
+  "github-handoff.php": "auth/handoff",
+  "github-session.php": "auth/session",
+  "github-logout.php": "auth/logout",
+  "github-file-commits.php": "files/commits",
+  "github-file-commit-diff.php": "files/commit-diff",
+  "github-pull-requests.php": "pull-requests",
+  "github-pull-request-review.php": "pull-requests/review",
+  "github-submit-page-edit.php": "page-edits",
+  "github-self-profile.php": "profiles/self",
+  "github-maintainers.php": "maintainers",
+  "github-talk.php": "talk",
+  "github-media.php": "profiles/media",
+  "github-contact.php": "contact",
+  "github-statistics-flush.php": "statistics/flush",
+  "github-statistics.php": "statistics",
+  "github-profile-views.php": "statistics/profile-views",
+  "location-search.php": "search/locations",
+  "data.php": "data",
+  "media.php": "media",
+  "memorials.php": "memorials",
+  "__capabilities": "meta/capabilities",
+  "check_writable_tmp.php": "temporary-storage-check",
+};
+
+function apiDescription(request, env, site = "") {
+  return jsonResponse(request, env, {
+    ok: true,
+    service: "Genepedia API",
+    api_version: 1,
+    ...(site ? { site, version: 1, base: `/v1/${site}` } : {
+      sites: { genepedia: "/v1/genepedia", gravepedia: "/v1/gravepedia" },
+      github_callback: "/v1/auth/github/callback",
+      openapi: "https://raw.githubusercontent.com/Genepedia/API/main/sites-worker/openapi.json",
+    }),
+  });
+}
+
+function methodNotAllowed(request, env, methods) {
+  return jsonResponse(request, env, {
+    ok: false,
+    success: false,
+    error: "method_not_allowed",
+    message: `Only ${methods.join(" and ")} requests are supported for this route.`,
+  }, 405, { Allow: methods.join(", ") });
+}
+
+function withMethods(request, env, methods, handler) {
+  if (!methods.includes(request.method)) {
+    return methodNotAllowed(request, env, methods);
+  }
+  return handler();
 }
 
 async function dispatch(request, env, ctx) {
   void ctx;
   const url = new URL(request.url);
   const route = url.pathname.replace(/\/+$/, "") || "/";
+  if (route === "/" || route === "/v1") return withMethods(request, env, ["GET"], () => apiDescription(request, env));
+  if (route === "/v1/auth/github/callback") return withMethods(request, env, ["GET"], () => oauthCallback(request, env));
+
   let site = "";
   let endpoint = "";
-  if (route === "/genepedia" || route.startsWith("/genepedia/")) {
-    site = "genepedia";
-    endpoint = route.slice("/genepedia".length).replace(/^\//, "");
-  } else if (route === "/gravepedia" || route.startsWith("/gravepedia/")) {
-    site = "gravepedia";
-    endpoint = route.slice("/gravepedia".length).replace(/^\//, "");
+  const versionedRoute = route.match(/^\/v1\/(genepedia|gravepedia)(?:\/(.*))?$/);
+  const legacyRoute = route.match(/^\/(genepedia|gravepedia)(?:\/(.*))?$/);
+  if (versionedRoute) {
+    site = versionedRoute[1];
+    endpoint = versionedRoute[2] || "";
+  } else if (legacyRoute) {
+    site = legacyRoute[1];
+    const legacyEndpoint = legacyRoute[2] || "";
+    endpoint = LEGACY_ENDPOINT_ALIASES[legacyEndpoint] || legacyEndpoint;
   } else {
     throw new ApiError(404, "not_found", "Unknown API route.");
   }
-  if (!endpoint) return jsonResponse(request, env, { ok: true, service: "Genepedia Sites API", site, version: 1 });
-  if (endpoint === "github-login.php") return loginStart(request, env, site);
-  if (endpoint === "local-login.php") return localLogin(request, env);
-  if (endpoint === "github-callback.php") return oauthCallback(request, env);
-  if (endpoint === "github-handoff.php") return loginHandoff(request, env);
-  if (endpoint === "github-session.php") {
+  if (!endpoint) return withMethods(request, env, ["GET"], () => apiDescription(request, env, site));
+  if (endpoint === "auth/github/login") return withMethods(request, env, ["GET"], () => loginStart(request, env, site));
+  if (endpoint === "auth/local/login") return withMethods(request, env, ["POST"], () => localLogin(request, env));
+  if (endpoint === "auth/github/callback") return withMethods(request, env, ["GET"], () => oauthCallback(request, env));
+  if (endpoint === "auth/handoff") return withMethods(request, env, ["POST"], () => loginHandoff(request, env));
+  if (endpoint === "auth/session") {
+    if (request.method !== "GET") return methodNotAllowed(request, env, ["GET"]);
     const session = await sessionFromRequest(request, env);
     const reviewLogin = String(env.GITHUB_REVIEW_LOGIN || "");
     const apiConfigured = Boolean(env.GITHUB_API_TOKEN || env.GITHUB_TOKEN || env.GH_TOKEN || env.GITHUB_PUBLISH_TOKEN || env.GITHUB_APP_ID);
@@ -2650,27 +2741,27 @@ async function dispatch(request, env, ctx) {
       user: session?.user || null,
     });
   }
-  if (endpoint === "github-logout.php") return logout(request, env);
-  if (endpoint === "github-config.php") return githubConfig(request, env, site);
-  if (endpoint === "github-file-commits.php") return fileCommits(request, env, site);
-  if (endpoint === "github-file-commit-diff.php") return fileCommitDiff(request, env, site);
-  if (endpoint === "github-pull-requests.php") return listPullRequests(request, env, site);
-  if (endpoint === "github-pull-request-review.php") return reviewPullRequest(request, env, site);
-  if (endpoint === "github-submit-page-edit.php") return submitPageEdit(request, env, site);
-  if (endpoint === "github-self-profile.php") return githubSelfProfile(request, env, site);
-  if (endpoint === "github-maintainers.php") return githubMaintainers(request, env, site);
-  if (endpoint === "github-talk.php") return githubTalk(request, env, site);
-  if (endpoint === "github-media.php") return request.method === "GET" ? mediaList(request, env, site) : mediaWrite(request, env, site);
-  if (endpoint === "github-contact.php") return githubContact(request, env, site);
-  if (endpoint === "github-statistics-flush.php") return site === "genepedia" ? statisticsFlush(request, env) : jsonResponse(request, env, { ok: false, error: "not_found", message: "This API endpoint is only available for Genepedia." }, 404);
-  if (endpoint === "github-statistics.php") return statistics(request, env);
-  if (endpoint === "github-profile-views.php") return statistics(request, env, true);
-  if (endpoint === "location-search.php") return locationSearch(request, env);
-  if (endpoint === "data.php") return dataProxy(request, env, site);
-  if (endpoint === "media.php") return mediaProxy(request, env, site);
-  if (endpoint === "memorials.php" && site === "gravepedia") return gravepediaMemorials(request, env);
-  if (endpoint === "__capabilities") return jsonResponse(request, env, { ok: true, implemented: ["GitHub and local login/session/handoff", "best-effort GitHub OAuth welcome stars/follows", "public data/media proxy", "commit history/diffs", "pull request listing/review", "page edit pull requests", "profile create/claim pull requests", "maintainer requests/invitations/decisions", "profile talk posts/deletes", "media pull requests", "contact issue submission", "D1-buffered statistics with GitHub publication", "location search", "Gravepedia memorial search/submission"], unimplemented: unsupportedEndpoints() });
-  if (unsupportedEndpoints().some((entry) => entry.startsWith(`${endpoint.replace(/\.php$/, "")} `) || entry.startsWith(endpoint))) {
+  if (endpoint === "auth/logout") return withMethods(request, env, ["POST"], () => logout(request, env));
+  if (endpoint === "auth/github/config") return withMethods(request, env, ["GET"], () => githubConfig(request, env, site));
+  if (endpoint === "files/commits") return withMethods(request, env, ["GET"], () => fileCommits(request, env, site));
+  if (endpoint === "files/commit-diff") return withMethods(request, env, ["GET"], () => fileCommitDiff(request, env, site));
+  if (endpoint === "pull-requests") return withMethods(request, env, ["GET"], () => listPullRequests(request, env, site));
+  if (endpoint === "pull-requests/review") return withMethods(request, env, ["POST"], () => reviewPullRequest(request, env, site));
+  if (endpoint === "page-edits") return withMethods(request, env, ["POST"], () => submitPageEdit(request, env, site));
+  if (endpoint === "profiles/self") return withMethods(request, env, ["POST"], () => githubSelfProfile(request, env, site));
+  if (endpoint === "maintainers") return withMethods(request, env, ["GET", "POST"], () => githubMaintainers(request, env, site));
+  if (endpoint === "talk") return withMethods(request, env, ["GET", "POST"], () => githubTalk(request, env, site));
+  if (endpoint === "profiles/media") return withMethods(request, env, ["GET", "POST"], () => request.method === "GET" ? mediaList(request, env, site) : mediaWrite(request, env, site));
+  if (endpoint === "contact") return withMethods(request, env, ["POST"], () => githubContact(request, env, site));
+  if (endpoint === "statistics/flush") return withMethods(request, env, ["GET", "POST"], () => site === "genepedia" ? statisticsFlush(request, env) : jsonResponse(request, env, { ok: false, error: "not_found", message: "This API endpoint is only available for Genepedia." }, 404));
+  if (endpoint === "statistics") return withMethods(request, env, ["GET", "POST"], () => statistics(request, env));
+  if (endpoint === "statistics/profile-views") return withMethods(request, env, ["GET", "POST"], () => statistics(request, env, true));
+  if (endpoint === "search/locations") return withMethods(request, env, ["GET"], () => locationSearch(request, env));
+  if (endpoint === "data") return withMethods(request, env, ["GET"], () => dataProxy(request, env, site));
+  if (endpoint === "media") return withMethods(request, env, ["GET"], () => mediaProxy(request, env, site));
+  if (endpoint === "memorials" && site === "gravepedia") return withMethods(request, env, ["GET", "POST"], () => gravepediaMemorials(request, env));
+  if (endpoint === "meta/capabilities") return withMethods(request, env, ["GET"], () => capabilities(request, env, site));
+  if (unsupportedEndpoints().includes(endpoint)) {
     return jsonResponse(request, env, { ok: false, error: "not_implemented", message: `The ${endpoint} endpoint is not implemented in the Sites API yet.` }, 501);
   }
   throw new ApiError(404, "not_found", "Unknown API route.");

@@ -1,0 +1,1189 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Genepedia API",
+    "version": "1.0.0",
+    "description": "Versioned JSON API for Genepedia and Gravepedia. Published content is stored in fixed GitHub repositories; D1 stores short-lived authentication state and queued statistics."
+  },
+  "servers": [
+    {
+      "url": "https://api.genepedia.org/v1",
+      "description": "Production API"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Auth"
+    },
+    {
+      "name": "Content"
+    },
+    {
+      "name": "Profiles"
+    },
+    {
+      "name": "Review"
+    },
+    {
+      "name": "Statistics"
+    },
+    {
+      "name": "Gravepedia"
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Discover API version and site bases",
+        "responses": {
+          "200": {
+            "description": "API discovery document"
+          }
+        }
+      }
+    },
+    "/auth/github/callback": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Complete shared GitHub OAuth flow",
+        "description": "OAuth state identifies which site started sign-in; browsers should reach this route through GitHub.",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to the initiating site"
+          },
+          "400": {
+            "description": "Invalid or expired OAuth state"
+          }
+        }
+      }
+    },
+    "/genepedia/auth/github/config": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Read public authentication configuration",
+        "responses": {
+          "200": {
+            "description": "Public GitHub and login configuration"
+          }
+        }
+      }
+    },
+    "/genepedia/auth/github/login": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Start GitHub sign-in",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to GitHub authorization"
+          },
+          "503": {
+            "description": "OAuth is not configured"
+          }
+        }
+      }
+    },
+    "/genepedia/auth/local/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign in with the optional local account",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "One-time handoff for the new session"
+          },
+          "401": {
+            "description": "Invalid credentials"
+          }
+        }
+      }
+    },
+    "/genepedia/auth/session": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Read the current session",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authentication state and public user details"
+          }
+        }
+      }
+    },
+    "/genepedia/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "End the current session",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session ended"
+          }
+        }
+      }
+    },
+    "/genepedia/auth/handoff": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Redeem a single-use login handoff",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "Session details and cookie"
+          },
+          "401": {
+            "description": "Invalid, expired, or already-used handoff"
+          }
+        }
+      }
+    },
+    "/genepedia/data": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read an allowed public GitHub data file",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File contents or JSON data"
+          },
+          "400": {
+            "description": "Path is outside the fixed repositories"
+          }
+        }
+      }
+    },
+    "/genepedia/media": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read an allowed public media file",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media file"
+          },
+          "404": {
+            "description": "Media file not found"
+          }
+        }
+      }
+    },
+    "/genepedia/files/commits": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read file history",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          },
+          {
+            "name": "paths",
+            "in": "query",
+            "description": "Optional comma-separated list of up to 12 paths in one fixed repository",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized commit list"
+          },
+          "400": {
+            "description": "Invalid or unsupported file path"
+          }
+        }
+      }
+    },
+    "/genepedia/files/commit-diff": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read the diff for an allowed file and commit",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          },
+          {
+            "name": "hash",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Commit diff"
+          },
+          "400": {
+            "description": "Invalid path or commit hash"
+          }
+        }
+      }
+    },
+    "/genepedia/pull-requests": {
+      "get": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "List or inspect edit requests",
+        "responses": {
+          "200": {
+            "description": "Open request list or selected request"
+          }
+        }
+      }
+    },
+    "/genepedia/pull-requests/review": {
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "Merge or decline an edit request",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "Review action completed"
+          },
+          "401": {
+            "description": "GitHub-authenticated reviewer required"
+          },
+          "403": {
+            "description": "Caller is not the configured reviewer"
+          }
+        }
+      }
+    },
+    "/genepedia/page-edits": {
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "Submit a page change for review",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Review request created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/genepedia/profiles/self": {
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Submit profile creation or ownership claim",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Review requests created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/genepedia/maintainers": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Read maintainer state",
+        "responses": {
+          "200": {
+            "description": "Maintainer ledger entries"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Submit a maintainer request or decision",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Review request created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/genepedia/talk": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Read a profile discussion",
+        "parameters": [
+          {
+            "name": "person",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Discussion messages"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Post or delete a discussion message",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "Discussion action completed"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/genepedia/profiles/media": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "List public profile media",
+        "responses": {
+          "200": {
+            "description": "Media metadata"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Submit a profile media upload or removal for review",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Review request created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/genepedia/contact": {
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "Submit a contact issue",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Issue created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/genepedia/statistics": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Read published statistics",
+        "responses": {
+          "200": {
+            "description": "Statistics for the requested metric and window"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Queue a statistics event",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "202": {
+            "description": "Event queued"
+          },
+          "429": {
+            "description": "Queue is full"
+          }
+        }
+      }
+    },
+    "/genepedia/statistics/profile-views": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Read popular profile views",
+        "responses": {
+          "200": {
+            "description": "Popular profiles"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Record a profile view",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "202": {
+            "description": "Event queued"
+          }
+        }
+      }
+    },
+    "/genepedia/statistics/flush": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Flush queued statistics",
+        "parameters": [
+          {
+            "name": "X-Statistics-Flush-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flush result"
+          },
+          "403": {
+            "description": "Invalid flush secret"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Publish queued statistics",
+        "parameters": [
+          {
+            "name": "X-Statistics-Flush-Token",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Flush result"
+          },
+          "403": {
+            "description": "Invalid flush secret"
+          }
+        }
+      }
+    },
+    "/genepedia/search/locations": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Search locations for structured profile fields",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Location search results"
+          }
+        }
+      }
+    },
+    "/genepedia/meta/capabilities": {
+      "get": {
+        "summary": "List API capabilities",
+        "responses": {
+          "200": {
+            "description": "Implemented and unavailable capabilities"
+          }
+        }
+      }
+    },
+    "/gravepedia/auth/github/config": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Read public authentication configuration",
+        "responses": {
+          "200": {
+            "description": "Public GitHub and login configuration"
+          }
+        }
+      }
+    },
+    "/gravepedia/auth/github/login": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Start GitHub sign-in",
+        "parameters": [
+          {
+            "name": "return_to",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "format": "uri"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to GitHub authorization"
+          }
+        }
+      }
+    },
+    "/gravepedia/auth/local/login": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign in with the optional local account",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "One-time handoff for the new session"
+          },
+          "401": {
+            "description": "Invalid credentials"
+          }
+        }
+      }
+    },
+    "/gravepedia/auth/session": {
+      "get": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Read the current session",
+        "security": [
+          {
+            "sessionCookie": []
+          },
+          {
+            "bearerToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authentication state and public user details"
+          }
+        }
+      }
+    },
+    "/gravepedia/auth/logout": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "End the current session",
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session ended"
+          }
+        }
+      }
+    },
+    "/gravepedia/auth/handoff": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Redeem a single-use login handoff",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "Session details and cookie"
+          },
+          "401": {
+            "description": "Invalid, expired, or already-used handoff"
+          }
+        }
+      }
+    },
+    "/gravepedia/data": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read an allowed public memorial data file",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File contents or JSON data"
+          },
+          "400": {
+            "description": "Path is outside the fixed repositories"
+          }
+        }
+      }
+    },
+    "/gravepedia/media": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read an allowed public media file",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media file"
+          }
+        }
+      }
+    },
+    "/gravepedia/files/commits": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read file history",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Normalized commit list"
+          }
+        }
+      }
+    },
+    "/gravepedia/files/commit-diff": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Read the diff for an allowed file and commit",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Path"
+          },
+          {
+            "name": "hash",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Commit diff"
+          }
+        }
+      }
+    },
+    "/gravepedia/pull-requests": {
+      "get": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "List or inspect edit requests",
+        "responses": {
+          "200": {
+            "description": "Open request list or selected request"
+          }
+        }
+      }
+    },
+    "/gravepedia/pull-requests/review": {
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "Merge or decline an edit request",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "Review action completed"
+          },
+          "401": {
+            "description": "GitHub-authenticated reviewer required"
+          }
+        }
+      }
+    },
+    "/gravepedia/page-edits": {
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "Submit a page change for review",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Review request created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    },
+    "/gravepedia/profiles/media": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "List public profile media",
+        "responses": {
+          "200": {
+            "description": "Media metadata"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Submit a media change for review",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Review request created"
+          }
+        }
+      }
+    },
+    "/gravepedia/contact": {
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "summary": "Submit a contact issue",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Issue created"
+          }
+        }
+      }
+    },
+    "/gravepedia/statistics": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Read published statistics",
+        "responses": {
+          "200": {
+            "description": "Statistics for the requested metric and window"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Queue a statistics event",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "202": {
+            "description": "Event queued"
+          }
+        }
+      }
+    },
+    "/gravepedia/statistics/profile-views": {
+      "get": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Read popular profile views",
+        "responses": {
+          "200": {
+            "description": "Popular profiles"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Statistics"
+        ],
+        "summary": "Record a profile view",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "202": {
+            "description": "Event queued"
+          }
+        }
+      }
+    },
+    "/gravepedia/search/locations": {
+      "get": {
+        "tags": [
+          "Content"
+        ],
+        "summary": "Search locations for structured profile fields",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Location search results"
+          }
+        }
+      }
+    },
+    "/gravepedia/meta/capabilities": {
+      "get": {
+        "summary": "List API capabilities",
+        "responses": {
+          "200": {
+            "description": "Implemented and unavailable capabilities"
+          }
+        }
+      }
+    },
+    "/gravepedia/memorials": {
+      "get": {
+        "tags": [
+          "Gravepedia"
+        ],
+        "summary": "Search published memorials",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Published matching memorials"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Gravepedia"
+        ],
+        "summary": "Submit a memorial for review",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Pending review request created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Path": {
+        "name": "path",
+        "in": "query",
+        "required": true,
+        "schema": {
+          "type": "string"
+        },
+        "description": "Path within the fixed GitHub repositories allowed for this site"
+      }
+    },
+    "requestBodies": {
+      "JsonObject": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "GitHub user access token returned through the one-time handoff"
+      },
+      "sessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-genepedia_session",
+        "description": "HttpOnly session cookie; browsers send it with credentials enabled"
+      }
+    }
+  }
+}

@@ -1,3 +1,10 @@
+# Historical PHP deployment guide
+
+This file documents the retired PHP/Afrihost deployment. It is kept for
+reference only. Production frontends use the JavaScript Worker hosted through
+ChatGPT Sites; see [`sites-worker/README.md`](sites-worker/README.md). Do not
+use these copy-to-server steps for a live release.
+
 # Quick copy-paste instructions for the API repository
 
 1. Copy the contents of this repository to your server document root (for
