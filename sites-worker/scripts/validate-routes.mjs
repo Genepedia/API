@@ -40,6 +40,7 @@ let welcomeUserFollowPuts = 0;
 let welcomeOrganizationFollowMutations = 0;
 let welcomeUserIsFollowed = false;
 let welcomeOrganizationIsFollowed = false;
+let largeCommitDiffPageRequests = 0;
 globalThis.fetch = async (input, init = {}) => {
   const url = new URL(typeof input === "string" ? input : input.url);
   const method = init.method || input?.method || "GET";
@@ -98,6 +99,20 @@ globalThis.fetch = async (input, init = {}) => {
   }
   if (url.pathname === "/repos/Genepedia/Genepedia/commits" && ["pages/people/29/index.html", "pages/people/29/profile.html", "pages/people/29/data/profile.html", "pages/people/29/data/talk.json"].includes(url.searchParams.get("path"))) {
     return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
+  if (url.pathname === "/repos/Genepedia/Genepedia/commits/deadbeef1234567") {
+    largeCommitDiffPageRequests += 1;
+    const headers = { "Content-Type": "application/json" };
+    const page = Number(url.searchParams.get("page") || 1);
+    if (page === 1) {
+      headers.Link = '<https://api.github.com/repos/Genepedia/Genepedia/commits/deadbeef1234567?page=2>; rel="next", <https://api.github.com/repos/Genepedia/Genepedia/commits/deadbeef1234567?page=2>; rel="last"';
+      return new Response(JSON.stringify({ parents: [{ sha: "bulk-parent" }], files: [] }), { status: 200, headers });
+    }
+    return new Response(JSON.stringify({ parents: [{ sha: "bulk-parent" }], files: [{ filename: "pages/people/29/index.html", status: "modified", additions: 1, deletions: 1, patch: "@@ -1 +1 @@" }] }), { status: 200, headers });
+  }
+  if (url.pathname === "/repos/Genepedia/Genepedia/contents/pages/people/29/index.html") {
+    const content = url.searchParams.get("ref") === "bulk-parent" ? "<h1>before</h1>" : "<h1>after</h1>";
+    return new Response(JSON.stringify({ type: "file", content: Buffer.from(content).toString("base64") }), { status: 200, headers: { "Content-Type": "application/json" } });
   }
   if (url.pathname === "/repos/Genepedia/Genepedia/commits" && url.searchParams.get("path") === "pages/login.html") {
     return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -542,6 +557,13 @@ try {
   assert.equal(profileHistorySources.status, 200);
   const profileHistorySourcesBody = await profileHistorySources.json();
   assert.deepEqual(profileHistorySourcesBody.repo_paths, ["pages/people/29/index.html", "pages/people/29/profile.html", "pages/people/29/data/profile.html", "pages/people/29/data/talk.json"], "profile history may include the profile page, prose, and talk file");
+
+  const largeCommitDiff = await worker.fetch(new Request("https://api.genepedia.org/v1/genepedia/files/commit-diff?path=pages%2Fpeople%2F29%2Findex.html&hash=deadbeef1234567"), env);
+  assert.equal(largeCommitDiff.status, 200);
+  const largeCommitDiffBody = await largeCommitDiff.json();
+  assert.equal(largeCommitDiffBody.diff.before, "<h1>before</h1>");
+  assert.equal(largeCommitDiffBody.diff.after, "<h1>after</h1>");
+  assert.equal(largeCommitDiffPageRequests, 2, "file diff lookup should follow GitHub pagination when the requested file is beyond the first commit page");
 
   const graveExtensionlessHistory = await worker.fetch(new Request("https://api.genepedia.org/v1/gravepedia/files/commits?path=pages%2Flogin&limit=1"), env);
   assert.equal(graveExtensionlessHistory.status, 200);

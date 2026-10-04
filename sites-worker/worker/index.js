@@ -931,10 +931,25 @@ async function fileCommitDiff(request, env, site) {
     throw new ApiError(400, "invalid_request", "Diff lookup is limited to one fixed repository and allowed paths.");
   }
   const repo = contexts[0].repo;
-  const commit = (await githubApi(env, "GET", repoPathUrl(repo, `/commits/${encodeURIComponent(hash)}`), { accept: "application/vnd.github+json" })).data;
+  const commitResponse = await githubApi(env, "GET", repoPathUrl(repo, `/commits/${encodeURIComponent(hash)}`), { accept: "application/vnd.github+json" });
+  const commit = commitResponse.data || {};
+  const changedFiles = Array.isArray(commit.files) ? [...commit.files] : [];
+  const missingPaths = new Set(contexts
+    .map((context) => context.repoPath)
+    .filter((path) => !changedFiles.some((entry) => entry.filename === path || entry.previous_filename === path)));
+  const lastFilesPage = Math.min(10, lastCommitDetailsPage(commitResponse.headers.get("Link"), hash));
+  for (let page = 2; page <= lastFilesPage && missingPaths.size; page += 1) {
+    const pageResponse = await githubApi(env, "GET", repoPathUrl(repo, `/commits/${encodeURIComponent(hash)}?page=${page}`), { accept: "application/vnd.github+json" });
+    const pageFiles = Array.isArray(pageResponse.data?.files) ? pageResponse.data.files : [];
+    changedFiles.push(...pageFiles);
+    for (const entry of pageFiles) {
+      missingPaths.delete(entry.filename);
+      if (entry.previous_filename) missingPaths.delete(entry.previous_filename);
+    }
+  }
   const diffs = [];
   for (const context of contexts) {
-    const changed = (commit.files || []).find((entry) => entry.filename === context.repoPath || entry.previous_filename === context.repoPath);
+    const changed = changedFiles.find((entry) => entry.filename === context.repoPath || entry.previous_filename === context.repoPath);
     if (!changed) continue;
     const binary = /\.(?:png|jpe?g|gif|webp|avif|ico|pdf|zip|woff2?|mp4|webm)$/i.test(context.repoPath);
     let before = null;
@@ -1383,13 +1398,21 @@ async function pathCreatedByUser(env, repo, path, login) {
 }
 
 function lastCommitHistoryPage(linkHeader) {
+  return lastPageFromGitHubLink(linkHeader, "/commits");
+}
+
+function lastCommitDetailsPage(linkHeader, hash) {
+  return lastPageFromGitHubLink(linkHeader, `/commits/${encodeURIComponent(hash)}`);
+}
+
+function lastPageFromGitHubLink(linkHeader, expectedPathSuffix) {
   for (const link of String(linkHeader || "").split(/,\s*(?=<)/)) {
     if (!/;\s*rel=["']?last["']?\s*(?:,|$)/i.test(link)) continue;
     const match = link.match(/<([^>]+)>/);
     if (!match) return 0;
     try {
       const url = new URL(match[1]);
-      if (url.origin !== "https://api.github.com" || !url.pathname.endsWith("/commits")) return 0;
+      if (url.origin !== "https://api.github.com" || !url.pathname.endsWith(expectedPathSuffix)) return 0;
       const page = Number(url.searchParams.get("page"));
       return Number.isSafeInteger(page) && page >= 1 ? page : 0;
     } catch { return 0; }
