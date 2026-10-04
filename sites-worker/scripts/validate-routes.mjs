@@ -96,6 +96,9 @@ globalThis.fetch = async (input, init = {}) => {
   if (url.pathname === "/repos/Genepedia/Genepedia/commits" && url.searchParams.get("path") === "pages/people/person-14/index.html") {
     return new Response(JSON.stringify([{ author: { login: "current-owner" } }, { author: { login: "test-user" } }]), { status: 200, headers: { "Content-Type": "application/json" } });
   }
+  if (url.pathname === "/repos/Genepedia/Genepedia/commits" && ["pages/people/29/index.html", "pages/people/29/profile.html", "pages/people/29/data/profile.html", "pages/people/29/data/talk.json"].includes(url.searchParams.get("path"))) {
+    return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
+  }
   if (url.pathname === "/repos/Genepedia/Genepedia/commits" && url.searchParams.get("path") === "pages/login.html") {
     return new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } });
   }
@@ -529,6 +532,16 @@ try {
   assert.equal(extensionlessHistory.status, 200);
   const extensionlessHistoryBody = await extensionlessHistory.json();
   assert.deepEqual(extensionlessHistoryBody.repo_paths, ["pages/login.html"], "extensionless Site routes should map to their source HTML file for history lookups");
+
+  const profileDirectoryHistory = await worker.fetch(new Request("https://api.genepedia.org/v1/genepedia/files/commits?path=pages%2Fpeople%2F29%2F&limit=1"), env);
+  assert.equal(profileDirectoryHistory.status, 200);
+  const profileDirectoryHistoryBody = await profileDirectoryHistory.json();
+  assert.deepEqual(profileDirectoryHistoryBody.repo_paths, ["pages/people/29/index.html"], "profile directory routes should map to their index page for history lookups");
+
+  const profileHistorySources = await worker.fetch(new Request("https://api.genepedia.org/v1/genepedia/files/commits?paths=pages%2Fpeople%2F29%2Findex.html%2Cpages%2Fpeople%2F29%2Fprofile.html%2Cpages%2Fpeople%2F29%2Fdata%2Fprofile.html%2Cpages%2Fpeople%2F29%2Fdata%2Ftalk.json&limit=1"), env);
+  assert.equal(profileHistorySources.status, 200);
+  const profileHistorySourcesBody = await profileHistorySources.json();
+  assert.deepEqual(profileHistorySourcesBody.repo_paths, ["pages/people/29/index.html", "pages/people/29/profile.html", "pages/people/29/data/profile.html", "pages/people/29/data/talk.json"], "profile history may include the profile page, prose, and talk file");
 
   const graveExtensionlessHistory = await worker.fetch(new Request("https://api.genepedia.org/v1/gravepedia/files/commits?path=pages%2Flogin&limit=1"), env);
   assert.equal(graveExtensionlessHistory.status, 200);

@@ -851,6 +851,7 @@ function workspacePathFor(site, input) {
     return null;
   }
   if (/^pages\/[A-Za-z0-9_.\/-]+\.html$/.test(path)
+    || /^pages\/people\/[0-9]+\/data\/talk\.json$/.test(path)
     || /^people\/[A-Za-z0-9_-]+\/(?:index|profile|[A-Za-z0-9_.-]+)\.html$/.test(path)
     || path === "sitemap.xml") {
     return { repo: REPOSITORIES.genepediaSite, repoPath: path, workspacePath: path };
@@ -859,6 +860,11 @@ function workspacePathFor(site, input) {
 }
 
 function historyContextFor(site, input) {
+  const rawPath = String(input || "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+  if (site === "genepedia" && /^pages\/(?:people|pets)\/[0-9]+\/?$/.test(rawPath)) {
+    const profilePath = safeRepoPath(rawPath.replace(/\/+$/, ""));
+    return profilePath ? workspacePathFor(site, `${profilePath}/index.html`) : null;
+  }
   const path = safeRepoPath(input);
   if (!path) return null;
   const fileName = path.slice(path.lastIndexOf("/") + 1);
