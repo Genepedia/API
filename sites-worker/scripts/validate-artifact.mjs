@@ -17,6 +17,7 @@ JSON.parse(manifest);
 const openApi = JSON.parse(openApiText);
 assert.equal(openApi.openapi, "3.1.0");
 assert.equal(openApi.servers[0]?.url, "https://api.genepedia.org/v1");
+assert.equal(source.includes(".php"), false, "the deployed Worker must not contain PHP-named API routes");
 for (const route of [
   "/openapi.json",
   "/genepedia/auth/github/config",

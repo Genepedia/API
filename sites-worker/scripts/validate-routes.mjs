@@ -367,9 +367,19 @@ try {
   assert.equal(configBody.local_login_configured, false, "local login is disabled unless both username and a password are configured");
   assert.equal(JSON.stringify(configBody).includes("client_secret"), false, "public config must not expose secret material");
 
-  const legacyConfig = await worker.fetch(new Request("https://api.genepedia.org/genepedia/github-config.php"), env);
-  assert.equal(legacyConfig.status, 200, "legacy clients should continue to work during the extensionless API migration");
-  assert.equal((await legacyConfig.json()).repo, configBody.repo);
+  for (const oldPath of [
+    "/genepedia",
+    "/gravepedia",
+    "/genepedia/github-config.php",
+    "/genepedia/github-callback.php",
+    "/genepedia/auth/session",
+    "/gravepedia/memorials.php",
+    "/v1/genepedia/github-config.php",
+  ]) {
+    const oldRoute = await worker.fetch(new Request(`https://api.genepedia.org${oldPath}`), env);
+    assert.equal(oldRoute.status, 404, `${oldPath} must not be served as an API alias`);
+    assert.equal((await oldRoute.json()).error, "not_found");
+  }
 
   const localLoginEnv = {
     DB: new MemoryD1(),

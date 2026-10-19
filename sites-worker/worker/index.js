@@ -2670,35 +2670,6 @@ function capabilities(request, env, site) {
   return jsonResponse(request, env, { ok: true, api_version: 1, site, implemented, unimplemented: unsupportedEndpoints() });
 }
 
-const LEGACY_ENDPOINT_ALIASES = {
-  "github-config.php": "auth/github/config",
-  "github-login.php": "auth/github/login",
-  "local-login.php": "auth/local/login",
-  "github-callback.php": "auth/github/callback",
-  "github-handoff.php": "auth/handoff",
-  "github-session.php": "auth/session",
-  "github-logout.php": "auth/logout",
-  "github-file-commits.php": "files/commits",
-  "github-file-commit-diff.php": "files/commit-diff",
-  "github-pull-requests.php": "pull-requests",
-  "github-pull-request-review.php": "pull-requests/review",
-  "github-submit-page-edit.php": "page-edits",
-  "github-self-profile.php": "profiles/self",
-  "github-maintainers.php": "maintainers",
-  "github-talk.php": "talk",
-  "github-media.php": "profiles/media",
-  "github-contact.php": "contact",
-  "github-statistics-flush.php": "statistics/flush",
-  "github-statistics.php": "statistics",
-  "github-profile-views.php": "statistics/profile-views",
-  "location-search.php": "search/locations",
-  "data.php": "data",
-  "media.php": "media",
-  "memorials.php": "memorials",
-  "__capabilities": "meta/capabilities",
-  "check_writable_tmp.php": "temporary-storage-check",
-};
-
 function apiDescription(request, env, site = "") {
   return jsonResponse(request, env, {
     ok: true,
@@ -2739,14 +2710,9 @@ async function dispatch(request, env, ctx) {
   let site = "";
   let endpoint = "";
   const versionedRoute = route.match(/^\/v1\/(genepedia|gravepedia)(?:\/(.*))?$/);
-  const legacyRoute = route.match(/^\/(genepedia|gravepedia)(?:\/(.*))?$/);
   if (versionedRoute) {
     site = versionedRoute[1];
     endpoint = versionedRoute[2] || "";
-  } else if (legacyRoute) {
-    site = legacyRoute[1];
-    const legacyEndpoint = legacyRoute[2] || "";
-    endpoint = LEGACY_ENDPOINT_ALIASES[legacyEndpoint] || legacyEndpoint;
   } else {
     throw new ApiError(404, "not_found", "Unknown API route.");
   }

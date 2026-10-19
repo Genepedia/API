@@ -63,9 +63,8 @@ Gravepedia also provides:
 
 The shared callback is the exception to the site bases. OAuth state records
 which site initiated the login, so both frontends return through the same
-registered callback. The Worker accepts the previous frontend route spellings
-as compatibility aliases while cached pages age out; current frontends use
-only the versioned routes above.
+registered callback. The Worker serves only the versioned routes listed above.
+Legacy PHP-named routes and unversioned site routes return `404 not_found`.
 
 For page history, a public extensionless URL such as `pages/login` maps to the
 source file `pages/login.html`. Other GitHub paths remain restricted to the
