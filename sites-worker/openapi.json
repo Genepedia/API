@@ -1535,6 +1535,106 @@
           }
         }
       }
+    },
+    "/genepedia/profiles/media/preview": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Preview an authorized staged media upload",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "number",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact media path in the selected edit request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Private staged media bytes; never cached"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          },
+          "403": {
+            "description": "Caller cannot view this staged media"
+          },
+          "404": {
+            "description": "No matching staged file in this site and change"
+          }
+        }
+      }
+    },
+    "/gravepedia/profiles/media/preview": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Preview an authorized staged media upload",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "number",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Exact media path in the selected edit request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Private staged media bytes; never cached"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          },
+          "403": {
+            "description": "Caller cannot view this staged media"
+          },
+          "404": {
+            "description": "No matching staged file in this site and change"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1546,7 +1646,7 @@
         "schema": {
           "type": "string"
         },
-        "description": "Path within the fixed GitHub repositories allowed for this site"
+        "description": "Path within the public storage namespaces allowed for this site"
       }
     },
     "requestBodies": {

@@ -27,7 +27,7 @@ const record = (namespace, path, content, content_type = 'application/json') => 
 try {
   await check('native imports are protected and public reads retain versions, ETags and isolation', async () => {
     await call('genepedia', 'storage/status', { status: 401 });
-    await importRows('genepedia', [record('data', 'people/persons/0/17.json', '{"id":17,"names":{"display":"Amina Test"}}'), record('data', 'people/ownership/0/17.json', '{"owner":{"githubLogin":"writer"}}'), record('content', 'pages/about.html', '<h1>Original</h1>', 'text/html'), record('data', 'support/contacts/test.json', '{"email":"private@example.org"}')]);
+    await importRows('genepedia', [record('data', 'people/persons/0/17.json', '{"id":17,"names":{"display":"Amina Test"}}'), record('data', 'people/ownership/0/17.json', '{"owner":{"githubLogin":"writer"},"maintainers":[{"githubLogin":"manager"}]}'), record('content', 'pages/about.html', '<h1>Original</h1>', 'text/html'), record('data', 'support/contacts/test.json', '{"email":"private@example.org"}')]);
     const { data, response } = await call('genepedia', 'data?path=people/persons/0/17.json');
     assert.equal(data.id, 17);
     assert.equal(response.headers.get('X-Document-Version'), '1');
@@ -79,6 +79,31 @@ try {
     await call('genepedia', 'profiles/media', { user: 'stranger', body: { person_id: '17', action: 'upload', filename: 'test.png', content_base64: 'AAECAw==' }, status: 403 });
     const media = await call('genepedia', 'profiles/media', { user: 'writer', body: { person_id: '17', action: 'upload', filename: 'test.png', content_base64: 'AAECAw==' }, status: 201 });
     const mediaNumber = media.data.pull_request.number;
+    const previewPath = 'pages/people/17/test.png';
+    const previewQuery = `profiles/media/preview?number=${mediaNumber}&path=${encodeURIComponent(previewPath)}`;
+    await call('genepedia', previewQuery, { status: 401 });
+    await call('genepedia', previewQuery, { user: 'stranger', status: 403 });
+    await call('genepedia', `profiles/media/preview?number=${mediaNumber}&path=${encodeURIComponent('pages/people/18/test.png')}`, { user: 'writer', status: 404 });
+    const pending = await call('genepedia', 'profiles/media?person=17', { user: 'writer' });
+    assert.equal(pending.data.pending[0].preview_url, `https://api.genepedia.org/v1/genepedia/${previewQuery}`);
+    const detail = await call('genepedia', `pull-requests?number=${mediaNumber}`, { user: 'writer' });
+    assert.equal(detail.data.diffs[0].preview_url, `https://api.genepedia.org/v1/genepedia/${previewQuery}`);
+    const fetchPreview = async (user) => worker.fetch(new Request(`https://api.genepedia.org/v1/genepedia/${previewQuery}`, {
+      headers: { Origin: 'https://www.genepedia.org', Authorization: `Bearer ${user}` },
+    }), env);
+    const preview = await fetchPreview('writer');
+    assert.equal(preview.status, 200);
+    assert.deepEqual([...new Uint8Array(await preview.arrayBuffer())], [0, 1, 2, 3]);
+    assert.equal(preview.headers.get('Access-Control-Allow-Origin'), 'https://www.genepedia.org');
+    assert.match(preview.headers.get('Cache-Control'), /no-store/);
+    assert.equal(preview.headers.get('X-Content-Type-Options'), 'nosniff');
+    assert.match(preview.headers.get('Content-Security-Policy'), /sandbox/);
+    const managerPreview = await fetchPreview('manager');
+    assert.equal(managerPreview.status, 200);
+    assert.deepEqual([...new Uint8Array(await managerPreview.arrayBuffer())], [0, 1, 2, 3]);
+    const reviewerPreview = await fetchPreview('reviewer');
+    assert.equal(reviewerPreview.status, 200);
+    assert.deepEqual([...new Uint8Array(await reviewerPreview.arrayBuffer())], [0, 1, 2, 3]);
     await call('genepedia', 'profiles/media', { user: 'reviewer', body: { person_id: '18', action: 'approve', number: mediaNumber }, status: 400 });
     await call('genepedia', 'profiles/media', { user: 'reviewer', body: { person_id: '17', action: 'approve', number: mediaNumber } });
     const response = await worker.fetch(new Request('https://api.genepedia.org/v1/genepedia/media?path=pages/people/17/test.png'), env);
@@ -116,6 +141,13 @@ try {
     catalog = await call('genepedia', 'content?path=pages/people/people.json');
     assert.ok(catalog.data.people.some((person) => String(person.id) === '71001'));
     assert.ok(catalog.data.people.some((person) => String(person.id) === '72001'));
+  });
+  await check('memorial submissions preserve plain-text source citations', async () => {
+    const citation = 'Cemetery register volume 3, page 42; photographed 2026-10-23.';
+    const submitted = await call('gravepedia', 'memorials', { user: 'writer', body: { name: 'Citation fixture', cemetery: 'Test cemetery', source: citation }, status: 201 });
+    const number = new URL(submitted.data.pull_request).searchParams.get('number');
+    const detail = await call('gravepedia', `pull-requests?number=${number}`, { user: 'reviewer' });
+    assert.equal(JSON.parse(detail.data.diffs[0].after).source, citation);
   });
   await check('both sites reject wrong methods, traversal, foreign origins and PHP routes', async () => {
     for (const site of ['genepedia', 'gravepedia']) {

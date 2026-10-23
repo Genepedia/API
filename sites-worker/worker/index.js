@@ -791,7 +791,7 @@ function normalizeMemorial(value) {
     death_date: text("death_date", 100),
     inscription: text("inscription", 12_000),
     notes: text("notes", 12_000),
-    source: safeHttpUrl(text("source", 2_000)),
+    source: text("source", 2_000),
   };
 }
 

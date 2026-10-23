@@ -126,6 +126,8 @@ async function call(site, suffix, payload) {
 let receipt = { started_at: new Date().toISOString(), summary, batches: [], completed: false };
 try { receipt = JSON.parse(await readFile(receiptPath, 'utf8')); } catch {}
 if (!verifyOnly) {
+  receipt.completed = false;
+  await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
   let batch = [];
   let encodedBytes = 0;
   let completedFiles = 0;

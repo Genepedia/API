@@ -2,6 +2,7 @@ export function createNativeHttp(h, store) {
   const fail = (status, code, message) => { throw new h.ApiError(status, code, message); };
   const siteUrl = (site) => `https://www.${site}.org`;
   const reviewUrl = (site, number) => `${siteUrl(site)}/pages/review_edits.html?number=${number}`;
+  const mediaPreviewUrl = (site, number, path) => `https://api.genepedia.org/v1/${site}/profiles/media/preview?number=${encodeURIComponent(number)}&path=${encodeURIComponent(path)}`;
   const publicRepo = (site) => `${site}/storage`;
   const json = (request, env, body, status = 200, headers = {}) => h.jsonResponse(request, env, body, status, headers);
   const safe = (input) => {
@@ -93,7 +94,7 @@ export function createNativeHttp(h, store) {
           if (!object) fail(503, 'storage_blob_missing', 'The proposed content is temporarily unavailable.');
           after = await object.text();
         }
-        diffs.push({ path: file.path, namespace: file.namespace, status: file.status, before: current?.content || null, after: after || null, patch: null, size: file.size, expected_version: file.expected_version, current_version: current?.version || 0 });
+        diffs.push({ path: file.path, namespace: file.namespace, status: file.status, before: current?.content || null, after: after || null, patch: null, size: file.size, expected_version: file.expected_version, current_version: current?.version || 0, ...(file.namespace === 'media' ? { preview_url: file.operation === 'delete' ? null : mediaPreviewUrl(site, change.number, file.path) } : {}) });
       }
       return json(request, env, { ok: true, repo: publicRepo(site), can_review: isReviewer(env, user), pull_request: changeForBrowser(site, change), diffs });
     }
@@ -174,6 +175,38 @@ export function createNativeHttp(h, store) {
     const config = parsed(await store.get(env, site, 'data', `people/ownership/${h.personBucket(person)}/${person}.json`));
     return config ? h.profileManagerLogins(config).includes(login(user)) : false;
   }
+  async function mediaPreview(request, env, site) {
+    const user = await viewer(request, env);
+    if (!user) fail(401, 'authentication_required', 'Sign in with GitHub to preview a pending media upload.');
+    const url = new URL(request.url);
+    const number = Number(url.searchParams.get('number') || 0);
+    if (!Number.isSafeInteger(number) || number <= 0) fail(400, 'invalid_change', 'A valid edit request number is required.');
+    const path = safe(url.searchParams.get('path'));
+    const match = path.match(/^pages\/people\/([A-Za-z0-9_-]{1,80})\/([a-z0-9][a-z0-9._-]{0,99}\.(?:jpe?g|png|gif|webp|avif|svg|pdf))$/i);
+    if (!match || path.includes('..')) fail(400, 'invalid_path', 'A valid profile media path is required.');
+    const change = await store.getChange(env, site, number);
+    if (!change) fail(404, 'change_not_found', 'This edit request was not found.');
+    if (!visibleChange(env, user, change) && !await managesMedia(env, site, match[1], user)) {
+      fail(403, 'forbidden', 'This media preview is available to its author, profile managers, and reviewer.');
+    }
+    const file = (change.files || []).find((entry) => entry.namespace === 'media' && entry.path === path && entry.operation !== 'delete');
+    if (!file || !file.blob_key) fail(404, 'media_preview_not_found', 'This edit request does not contain the selected pending media upload.');
+    const object = await store.getBlob(env, site, file.blob_key);
+    if (!object) fail(503, 'storage_blob_missing', 'The proposed media is temporarily unavailable.');
+    const bytes = await object.arrayBuffer();
+    const rawType = String(file.content_type || h.contentType(path) || 'application/octet-stream');
+    const type = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i.test(rawType) ? rawType : 'application/octet-stream';
+    const headers = {
+      ...h.corsHeaders(request, env),
+      'Content-Type': type,
+      'Content-Length': String(bytes.byteLength),
+      'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+      'X-Content-Type-Options': 'nosniff',
+      'Content-Security-Policy': "default-src 'none'; sandbox",
+      'Content-Disposition': `inline; filename="${match[2]}"`,
+    };
+    return new Response(bytes, { status: 200, headers });
+  }
   async function profileMedia(request, env, site) {
     const url = new URL(request.url);
     const body = request.method === 'POST' ? await h.readJson(request) : {};
@@ -195,7 +228,7 @@ export function createNativeHttp(h, store) {
         for (const change of page.changes) {
           if (!visibleChange(env, user, change) && !canManage) continue;
           const detail = change.files ? change : await store.getChange(env, site, change.number);
-          for (const file of detail.files || []) if (file.namespace === 'media' && file.path.startsWith(`pages/people/${person}/`)) pending.push({ number: detail.number, action: file.operation === 'delete' ? 'delete' : 'upload', filename: file.path.split('/').at(-1), path: file.path, url: reviewUrl(site, detail.number), user: detail.user, created_at: detail.created_at });
+          for (const file of detail.files || []) if (file.namespace === 'media' && file.path.startsWith(`pages/people/${person}/`)) pending.push({ number: detail.number, action: file.operation === 'delete' ? 'delete' : 'upload', filename: file.path.split('/').at(-1), path: file.path, url: reviewUrl(site, detail.number), ...(file.operation === 'delete' ? { preview_url: null } : { preview_url: mediaPreviewUrl(site, detail.number, file.path) }), user: detail.user, created_at: detail.created_at });
         }
       }
       return json(request, env, { ok: true, repo: publicRepo(site), person, images, pending, can_manage: canManage, can_review: isReviewer(env, user), manager_logins: [], next_cursor: next });
@@ -273,6 +306,7 @@ export function createNativeHttp(h, store) {
         return json(request, env, { ok: true, number: Number(body.number), action: body.action, result: { ...result, state: result.merged ? 'closed' : result.state, merged: result.merged } });
       }
       if (endpoint === 'files/commits' || endpoint === 'files/commit-diff') return request.method === 'GET' ? fileHistory(request, env, site, endpoint.endsWith('commit-diff')) : h.methodNotAllowed(request, env, ['GET']);
+      if (endpoint === 'profiles/media/preview') return request.method === 'GET' ? mediaPreview(request, env, site) : h.methodNotAllowed(request, env, ['GET']);
       if (endpoint === 'profiles/media') return ['GET', 'POST'].includes(request.method) ? profileMedia(request, env, site) : h.methodNotAllowed(request, env, ['GET', 'POST']);
       return null;
     },
