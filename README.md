@@ -9,8 +9,9 @@ The live Genepedia and Gravepedia backend is the JavaScript Worker in
 
 Its endpoint contract is documented in
 [`sites-worker/openapi.json`](sites-worker/openapi.json). The Worker uses
-GitHub as the source of record for public site data and files, with D1 for
-short-lived authentication state, encrypted sessions, and queued statistics.
+Sites D1 and R2 as the source of record for runtime data and files. GitHub
+is retained for sign-in and source/history archives; repository access is not
+required for website reads, edits, review, media or statistics.
 
 The PHP files in this repository are retained as historical source and are
 not deployed as the production API. Do not upload them to Afrihost or configure

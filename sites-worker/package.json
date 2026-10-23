@@ -4,6 +4,9 @@
   "type": "module",
   "scripts": {
     "build": "bash scripts/build.sh",
-    "validate": "node scripts/validate-artifact.mjs && node scripts/validate-routes.mjs"
+    "validate": "node scripts/validate-artifact.mjs && node scripts/validate-routes.mjs && node scripts/validate-native-storage.mjs && node scripts/validate-native-domain.mjs && node scripts/validate-native-http.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
   }
 }

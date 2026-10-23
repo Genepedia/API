@@ -3,7 +3,7 @@
   "info": {
     "title": "Genepedia API",
     "version": "1.0.0",
-    "description": "Versioned JSON API for Genepedia and Gravepedia. Published content is stored in fixed GitHub repositories; D1 stores short-lived authentication state and queued statistics."
+    "description": "Versioned API for Genepedia and Gravepedia, with structured records in Sites D1 and immutable files in Sites R2. GitHub is an optional identity provider; repository access is not required for data operations."
   },
   "servers": [
     {
@@ -208,7 +208,7 @@
         "tags": [
           "Content"
         ],
-        "summary": "Read an allowed public GitHub data file",
+        "summary": "Read published structured JSON from D1",
         "parameters": [
           {
             "$ref": "#/components/parameters/Path"
@@ -219,7 +219,7 @@
             "description": "File contents or JSON data"
           },
           "400": {
-            "description": "Path is outside the fixed repositories"
+            "description": "Path is outside the public storage paths"
           }
         }
       }
@@ -229,7 +229,7 @@
         "tags": [
           "Content"
         ],
-        "summary": "Read an allowed public media file",
+        "summary": "Read published media bytes from R2",
         "parameters": [
           {
             "$ref": "#/components/parameters/Path"
@@ -258,7 +258,7 @@
           {
             "name": "paths",
             "in": "query",
-            "description": "Optional comma-separated list of up to 12 paths in one fixed repository",
+            "description": "Optional comma-separated list of up to 12 paths in the selected site storage",
             "schema": {
               "type": "string"
             }
@@ -322,7 +322,8 @@
           "200": {
             "description": "Open request list or selected request"
           }
-        }
+        },
+        "description": "Native Sites edit requests; these are stored in D1 and are not GitHub pull requests. Authors see their own requests; the configured reviewer sees all."
       }
     },
     "/genepedia/pull-requests/review": {
@@ -330,7 +331,7 @@
         "tags": [
           "Review"
         ],
-        "summary": "Merge or decline an edit request",
+        "summary": "Approve or decline an edit request",
         "security": [
           {
             "bearerToken": []
@@ -352,7 +353,19 @@
           "403": {
             "description": "Caller is not the configured reviewer"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/page-edits": {
@@ -378,8 +391,24 @@
           },
           "401": {
             "description": "GitHub sign-in required"
+          },
+          "428": {
+            "description": "Existing files require expected_version from the original read"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ],
+        "description": "Stage files for atomic approval. Each file may supply expected_version from X-Document-Version. Stale versions return 409 without publishing any file."
       }
     },
     "/genepedia/profiles/self": {
@@ -406,7 +435,19 @@
           "401": {
             "description": "GitHub sign-in required"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/maintainers": {
@@ -444,7 +485,19 @@
           "401": {
             "description": "GitHub sign-in required"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/talk": {
@@ -492,7 +545,19 @@
           "401": {
             "description": "GitHub sign-in required"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/profiles/media": {
@@ -530,7 +595,19 @@
           "401": {
             "description": "GitHub sign-in required"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/contact": {
@@ -538,7 +615,7 @@
         "tags": [
           "Review"
         ],
-        "summary": "Submit a contact issue",
+        "summary": "Store a contact message",
         "security": [
           {
             "bearerToken": []
@@ -557,7 +634,19 @@
           "401": {
             "description": "GitHub sign-in required"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/statistics": {
@@ -565,7 +654,7 @@
         "tags": [
           "Statistics"
         ],
-        "summary": "Read published statistics",
+        "summary": "Read stored and aggregated statistics",
         "responses": {
           "200": {
             "description": "Statistics for the requested metric and window"
@@ -576,7 +665,7 @@
         "tags": [
           "Statistics"
         ],
-        "summary": "Queue a statistics event",
+        "summary": "Record a statistics event",
         "requestBody": {
           "$ref": "#/components/requestBodies/JsonObject"
         },
@@ -587,7 +676,19 @@
           "429": {
             "description": "Queue is full"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/statistics/profile-views": {
@@ -614,7 +715,19 @@
           "202": {
             "description": "Event queued"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/genepedia/statistics/flush": {
@@ -655,6 +768,16 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
           }
         ],
         "responses": {
@@ -818,7 +941,7 @@
         "tags": [
           "Content"
         ],
-        "summary": "Read an allowed public memorial data file",
+        "summary": "Read published structured JSON from D1",
         "parameters": [
           {
             "$ref": "#/components/parameters/Path"
@@ -829,7 +952,7 @@
             "description": "File contents or JSON data"
           },
           "400": {
-            "description": "Path is outside the fixed repositories"
+            "description": "Path is outside the public storage paths"
           }
         }
       }
@@ -839,7 +962,7 @@
         "tags": [
           "Content"
         ],
-        "summary": "Read an allowed public media file",
+        "summary": "Read published media bytes from R2",
         "parameters": [
           {
             "$ref": "#/components/parameters/Path"
@@ -906,7 +1029,8 @@
           "200": {
             "description": "Open request list or selected request"
           }
-        }
+        },
+        "description": "Native Sites edit requests; these are stored in D1 and are not GitHub pull requests. Authors see their own requests; the configured reviewer sees all."
       }
     },
     "/gravepedia/pull-requests/review": {
@@ -914,7 +1038,7 @@
         "tags": [
           "Review"
         ],
-        "summary": "Merge or decline an edit request",
+        "summary": "Approve or decline an edit request",
         "security": [
           {
             "bearerToken": []
@@ -933,7 +1057,19 @@
           "401": {
             "description": "GitHub-authenticated reviewer required"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/gravepedia/page-edits": {
@@ -959,8 +1095,24 @@
           },
           "401": {
             "description": "GitHub sign-in required"
+          },
+          "428": {
+            "description": "Existing files require expected_version from the original read"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ],
+        "description": "Stage files for atomic approval. Each file may supply expected_version from X-Document-Version. Stale versions return 409 without publishing any file."
       }
     },
     "/gravepedia/profiles/media": {
@@ -995,7 +1147,19 @@
           "201": {
             "description": "Review request created"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/gravepedia/contact": {
@@ -1003,7 +1167,7 @@
         "tags": [
           "Review"
         ],
-        "summary": "Submit a contact issue",
+        "summary": "Store a contact message",
         "security": [
           {
             "bearerToken": []
@@ -1019,7 +1183,19 @@
           "201": {
             "description": "Issue created"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/gravepedia/statistics": {
@@ -1027,7 +1203,7 @@
         "tags": [
           "Statistics"
         ],
-        "summary": "Read published statistics",
+        "summary": "Read stored and aggregated statistics",
         "responses": {
           "200": {
             "description": "Statistics for the requested metric and window"
@@ -1038,7 +1214,7 @@
         "tags": [
           "Statistics"
         ],
-        "summary": "Queue a statistics event",
+        "summary": "Record a statistics event",
         "requestBody": {
           "$ref": "#/components/requestBodies/JsonObject"
         },
@@ -1046,7 +1222,19 @@
           "202": {
             "description": "Event queued"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/gravepedia/statistics/profile-views": {
@@ -1073,7 +1261,19 @@
           "202": {
             "description": "Event queued"
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
       }
     },
     "/gravepedia/search/locations": {
@@ -1149,6 +1349,186 @@
         "responses": {
           "201": {
             "description": "Pending review request created"
+          },
+          "401": {
+            "description": "GitHub sign-in required"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "description": "Retry the same logical operation with the same key and payload. A changed payload returns 409."
+          }
+        ]
+      }
+    },
+    "/genepedia/content": {
+      "get": {
+        "summary": "Read published page content or a public file from R2",
+        "operationId": "genepediaReadContent",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored content bytes"
+          },
+          "304": {
+            "description": "ETag matches"
+          },
+          "404": {
+            "description": "No published file exists"
+          }
+        }
+      }
+    },
+    "/genepedia/search/people": {
+      "get": {
+        "summary": "Search the indexed person and pet catalog",
+        "operationId": "genepediaSearchPeople",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked matches and bounded pagination metadata"
+          },
+          "400": {
+            "description": "Invalid search query"
+          }
+        }
+      }
+    },
+    "/gravepedia/content": {
+      "get": {
+        "summary": "Read published page content or a public file from R2",
+        "operationId": "gravepediaReadContent",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 500
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored content bytes"
+          },
+          "304": {
+            "description": "ETag matches"
+          },
+          "404": {
+            "description": "No published file exists"
+          }
+        }
+      }
+    },
+    "/gravepedia/search/people": {
+      "get": {
+        "summary": "Search the indexed person and pet catalog",
+        "operationId": "gravepediaSearchPeople",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked matches and bounded pagination metadata"
+          },
+          "400": {
+            "description": "Invalid search query"
+          }
+        }
+      }
+    },
+    "/genepedia/profiles/owned": {
+      "get": {
+        "tags": [
+          "Profiles"
+        ],
+        "summary": "Find the signed-in user\u2019s currently owned profiles",
+        "security": [
+          {
+            "bearerToken": []
+          },
+          {
+            "sessionCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current indexed ownership records"
           },
           "401": {
             "description": "GitHub sign-in required"

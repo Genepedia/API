@@ -1,154 +1,91 @@
-# Genepedia API
+# Genepedia and Gravepedia API
 
-The production API is a JavaScript ES module running as a Cloudflare Worker
-through ChatGPT Sites. One versioned API serves Genepedia and Gravepedia:
+Production is a JavaScript ES module on ChatGPT Sites at `https://api.genepedia.org`.
+The API uses Web Request/Response, fetch and Web Crypto, without an application framework.
+`esbuild` is a build dependency. No PHP is deployed and PHP-named routes return 404.
 
-- `https://api.genepedia.org/v1/genepedia`
-- `https://api.genepedia.org/v1/gravepedia`
-- Shared GitHub OAuth callback: `https://api.genepedia.org/v1/auth/github/callback`
+## Storage
 
-The service uses the Web `Request`, `Response`, `fetch`, and Web Crypto APIs;
-it has no application framework or runtime package dependencies. The legacy
-PHP files in the parent repository are not part of this deployment. GitHub
-remains the source of record for published site, people, memorial, and media
-data. This Worker fixes every repository it can access in `worker/index.js`;
-callers cannot choose an arbitrary GitHub owner or repository.
+- Sites D1 (`DB`): structured records, indexed person/pet and memorial search, document versions, review requests, ownership, discussions, contact messages, statistics and encrypted login sessions.
+- Sites R2 (`BUCKET`): immutable, content-hashed binary and large text files. Small UTF-8 pages and assets stay inline in D1. D1 stores their published pointers.
+- The two frontend Sites Workers serve those published files at the existing domains and cache public responses for 60 seconds. New profile routes can use the profile shell after verifying the stored record.
+- GitHub provides optional sign-in and the existing welcome actions. Repository access is not needed for website data reads, saves or reviews. Original repositories and their Git history remain recovery archives; they are not automatically deleted or rewritten.
+- External source links and third-party image URLs in genealogy records remain external links.
 
-The OpenAPI 3.1 contract is in [`openapi.json`](openapi.json).
+The public API bases are `/v1/genepedia` and `/v1/gravepedia`.
+The shared OAuth callback is `/v1/auth/github/callback`.
+See [openapi.json](openapi.json) for routes and request contracts.
+The `pull-requests` resource contains native Sites edit requests; reviewers use
+`/pages/review_edits.html` on either website. These routes do not create GitHub PRs.
 
-## API contract
+## Integrity and permissions
 
-`GET /v1` returns service discovery. Site-specific routes share the same
-resource paths under their site base. Responses are JSON unless a route returns
-the GitHub OAuth redirect or a proxied media file. Errors use the shape
-`{ "ok": false, "error": "...", "message": "..." }`.
+File writes check expected document versions inside one D1 transaction. Approval publishes
+all proposed files atomically; conflicting versions or an existing reservation reject the
+operation. R2 bodies are written before D1 pointers change, so a failed transaction may
+leave an unreferenced blob but cannot publish half an edit. History retains previous
+versions. Callers should send `Idempotency-Key` on retried writes. Reusing a key with
+changed intent returns 409. Editors send `expected_version` from `X-Document-Version`. Existing-file edits without a base version return 428; stale versions return 409. Native catalogs derive from the approved search index, so profile creation never stages a client copy of a shared catalog.
 
-| Method | Genepedia and Gravepedia route | Purpose |
-| --- | --- | --- |
-| `GET` | `/auth/github/config` | Public authentication and repository configuration |
-| `GET` | `/auth/github/login` | Start GitHub OAuth; accepts an allowlisted `return_to` |
-| `POST` | `/auth/local/login` | Optional standalone username/password login |
-| `GET` | `/auth/session` | Read the current session |
-| `POST` | `/auth/logout` | End the current session |
-| `POST` | `/auth/handoff` | Redeem a one-time login handoff |
-| `GET` | `/data?path=...` | Read an allowlisted public data file from GitHub |
-| `GET` | `/media?path=...` | Read an allowlisted public media file from GitHub |
-| `GET` | `/files/commits?path=...` | Read allowed file history; accepts up to 12 paths |
-| `GET` | `/files/commit-diff?path=...&hash=...` | Read an allowed commit diff |
-| `GET` | `/pull-requests` | List open edit requests or inspect one request |
-| `POST` | `/pull-requests/review` | Merge or close a request as the configured reviewer |
-| `POST` | `/page-edits` | Submit a page edit for review |
-| `GET`, `POST` | `/profiles/media` | List profile media or submit an upload/removal for review |
-| `POST` | `/contact` | Submit a signed-in contact issue |
-| `GET`, `POST` | `/statistics` | Read published statistics or queue an event |
-| `GET`, `POST` | `/statistics/profile-views` | Profile-view compatibility resource |
-| `GET` | `/search/locations?q=...` | Search locations for profile editors |
-| `GET` | `/meta/capabilities` | List supported and unavailable features |
+GitHub sessions are required for saving or moderating user data. Only
+`GITHUB_REVIEW_LOGIN` can approve or decline edits. Profile managers can submit media
+changes. Ownership, maintainer and discussion permissions are checked by the API.
+Local password login is a browsing session. Contact records have no public read route.
+The profile hidden/private flag remains a website display choice; published genealogy
+JSON is intentionally readable through the public data API.
 
-Genepedia also provides:
+## Runtime configuration
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `POST` | `/profiles/self` | Submit profile creation or ownership claim changes |
-| `GET`, `POST` | `/maintainers` | Read or submit maintainer requests and decisions |
-| `GET`, `POST` | `/talk` | Read, post, or delete profile discussions |
-| `GET`, `POST` | `/statistics/flush` | Flush queued statistics with the configured secret |
+Store secrets in Sites environment variables, never in Git or hosting.json.
 
-Gravepedia also provides:
+- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`: OAuth identity credentials.
+- `GITHUB_SESSION_SECRET`: high-entropy encryption key for D1 login state.
+- `GITHUB_CALLBACK_URL`: optional exact registered OAuth callback override.
+- `GITHUB_REVIEW_LOGIN`: reviewer identity.
+- `GITHUB_ALLOWED_CORS_ORIGINS`, `GITHUB_ALLOWED_RETURN_ORIGINS`: exact origin lists.
+- `GITHUB_WELCOME_ACTIONS`, `GITHUB_WELCOME_STAR_REPOS`, `GITHUB_WELCOME_FOLLOW_USERS`: optional existing welcome behaviour.
+- `LOCAL_LOGIN_USERNAME`, `LOCAL_LOGIN_PASSWORD_HASH` or `LOCAL_LOGIN_PASSWORD`, `LOCAL_LOGIN_DISPLAY_NAME`: optional local browsing login.
+- `STORAGE_MIGRATION_TOKEN`: temporary import secret. Remove after verification and redeploy.
+- `GITHUB_STATISTICS_FLUSH_TOKEN`: optional administrative statistics-drain secret.
 
-| Method | Route | Purpose |
-| --- | --- | --- |
-| `GET` | `/memorials?q=...` | Search published memorials |
-| `POST` | `/memorials` | Submit a memorial for review |
+D1 migrations are applied by Sites before Worker upload. Do not edit an applied migration;
+add another migration. No request handler issues schema DDL.
 
-The shared callback is the exception to the site bases. OAuth state records
-which site initiated the login, so both frontends return through the same
-registered callback. The Worker serves only the versioned routes listed above.
-Legacy PHP-named routes and unversioned site routes return `404 not_found`.
-
-For page history, a public extensionless URL such as `pages/login` maps to the
-source file `pages/login.html`. Other GitHub paths remain restricted to the
-allowlisted repositories and formats in the Worker.
-
-## GitHub repository routing
-
-| Site/API prefix | Site and data repository | Media repository |
-| --- | --- | --- |
-| `/v1/genepedia` | `Genepedia/Genepedia`; `Genepedia/Genepedia-Database` for database/statistics paths | `Genepedia/Genepedia-Media` |
-| `/v1/gravepedia` | `Genepedia/Gravepedia` for pages and `data/memorials/` | `Genepedia/Gravepedia-Media` |
-
-Public content reads use the GitHub API and raw file URLs. Writes use a
-server-side GitHub App installation token or a publish token, and create a
-branch plus review pull request. Gravepedia submissions remain pending until
-a maintainer merges their review request.
-
-## Storage and secrets
-
-`.openai/hosting.json` declares the Sites D1 binding `DB`. Sites applies the
-schema migration in `drizzle/0000_worker_storage.sql` before uploading the
-Worker; request handling never changes the schema. D1 stores expiring OAuth
-state, one-time handoffs, encrypted sessions, and queued statistics events.
-GitHub stores the published site content and records.
-
-Set runtime values in the Sites secret manager. Do not add secrets or key files
-to this source tree or hosting manifest.
-
-| Variable | Purpose |
-| --- | --- |
-| `GITHUB_CLIENT_ID` | GitHub OAuth/App client ID |
-| `GITHUB_CLIENT_SECRET` | GitHub OAuth client secret |
-| `GITHUB_SESSION_SECRET` | High-entropy key source used to encrypt session records in D1 |
-| `GITHUB_CALLBACK_URL` | Optional callback override; default is `https://api.genepedia.org/v1/auth/github/callback`. Register this exact URL in GitHub |
-| `GITHUB_APP_ID` | Optional numeric GitHub App ID |
-| `GITHUB_APP_PRIVATE_KEY` | Optional GitHub App PEM key, supplied as a runtime secret |
-| `GITHUB_APP_INSTALLATION_ID` | Optional installation ID; otherwise looked up for the fixed site repository |
-| `GITHUB_PUBLISH_TOKEN` | Optional token with Contents and Pull requests write access to the fixed repositories |
-| `GITHUB_API_TOKEN` | Optional GitHub API read token; can also be used for authorized writes |
-| `GITHUB_REVIEW_LOGIN` | GitHub login allowed to merge or decline review requests |
-| `GITHUB_STATISTICS_FLUSH_TOKEN` | Secret required to flush the statistics queue |
-| `GITHUB_STATISTICS_SYNC` | Set to `0` to retain queued events without publishing them to GitHub |
-| `GITHUB_ALLOWED_CORS_ORIGINS` | Comma-separated exact origins allowed to call the API |
-| `GITHUB_ALLOWED_RETURN_ORIGINS` | Comma-separated HTTPS origins allowed for OAuth return URLs |
-| `GITHUB_WELCOME_ACTIONS` | Set to `0`, `false`, `no`, or `off` to disable welcome stars and follows |
-| `GITHUB_WELCOME_STAR_REPOS` | Comma-separated repositories to star after GitHub login |
-| `GITHUB_WELCOME_FOLLOW_USERS` | Comma-separated GitHub accounts to follow after login |
-| `LOCAL_LOGIN_USERNAME` | Optional username for the standalone local login page |
-| `LOCAL_LOGIN_PASSWORD` | Optional password secret; leave unset to disable password login |
-| `LOCAL_LOGIN_PASSWORD_HASH` | Optional PBKDF2-SHA-256 password hash; takes precedence over the password |
-| `LOCAL_LOGIN_DISPLAY_NAME` | Optional display name for a local login |
-
-GitHub App credentials are preferred for writes. The App needs Contents and
-Pull requests read/write on the site, database, and media repositories; Issues
-write is needed for contact submissions. GitHub requires Metadata read-only.
-`GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are separate from the App ID and
-private key.
-
-The CORS allowlist uses exact origins, reflects only an allowed origin, and
-supports credentialed requests. Wildcard origins are not supported. OAuth
-state is single-use, bound to an HttpOnly CSRF cookie, and expires after ten
-minutes. Handoffs expire after three minutes. Session and handoff payloads are
-encrypted in D1.
-
-Local login sessions can browse but cannot use GitHub write, merge, decline,
-or moderation routes. Those operations require a GitHub-authenticated session.
-`LOCAL_LOGIN_PASSWORD_HASH` uses
-`pbkdf2-sha256$iterations$salt-base64url$digest-base64url`, with 100,000 to
-1,000,000 PBKDF2-SHA-256 iterations. PHP bcrypt hashes are not accepted by the
-Worker.
-
-## Build and validation
-
-Run from this directory:
+## Build and checks
 
 ```sh
+npm ci
 npm run build
 npm run validate
 ```
 
-Validation checks the emitted ESM artifact and exercises API discovery,
-versioned and compatibility routes, CORS, OAuth callback construction,
-memorial search/submission auth, repository path restrictions, profile and
-maintainer permissions, talk and media write authorization, pull request
-cleanup, file-history pagination and extensionless page paths, statistics
-queue limits, and the flush-secret gate with local mocks. It does not contact
-GitHub or require production secrets.
+The suites exercise real SQLite transactions with an R2 byte fixture, plus HTTP and
+identity mocks. They cover concurrent writes, rollback, retries, stale approvals,
+profile/pet isolation, permissions, media bytes, search, statistics, OAuth and CORS.
+No production records or real GitHub account are used by these local suites.
+
+## Import and recovery
+
+`scripts/migrate-storage.mjs --source <snapshot> --content-genepedia <public-build>
+--content-gravepedia <public-build>` imports a fixed source snapshot. The migration token
+is read from hidden stdin. `--plan` produces a checksum manifest without uploading;
+`--verify` compares every source checksum against the paginated destination manifest.
+Receipts live outside the source checkout. Identical files skip safely on retries;
+replacing different content requires an explicit expected version.
+
+Keep the source snapshot, checksum manifest and receipts until a separate backup restore
+has been exercised. Native history starts at the import; older Git history remains in
+the original repositories. Migration copies data and does not erase public Git history.
+
+## Capacity work
+
+Indexed, paginated reads, bounded response sizes, atomic writes, short public caches and
+coalesced statistics reads address the previous GitHub request/write bottlenecks. This is
+not a benchmark proving millions of active users. Before that scale, measure realistic
+concurrency and latency, confirm Sites account quotas, define backup/restore operations,
+and partition storage when needed. Raw statistics and high-cardinality hourly rollups
+need a retention/compaction policy. Leaderboard output is capped and the API marks capped
+tracked-group counts. Large immutable imported registries are snapshots; use indexed
+search for current discovery rather than downloading every profile.
+
+The current full-catalog export is capped at 10,000 rows with cursor pagination. Existing bulk-list editor consumers must be moved to targeted paginated lookups before the catalog reaches that size; primary website search already uses indexed API pagination.

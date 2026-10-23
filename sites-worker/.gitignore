@@ -1,2 +1,6 @@
 dist/
 site.tar.gz
+node_modules/
+.env*
+.sites-runtime/
+migration-receipts*.json
